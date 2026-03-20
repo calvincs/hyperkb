@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+hyperkb/_version.py
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# hyperkb index
+.hkb/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test
+.pytest_cache/
+
+# Archives
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local config (skills are tracked separately)
+.claude/settings.local.json
+.claude/plans/
+.claude/projects/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key

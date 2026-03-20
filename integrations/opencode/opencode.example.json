@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "hyperkb": {
+      "type": "local",
+      "command": ["/home/YOU/.hkb/venv/bin/hkb-mcp"],
+      "enabled": true
+    }
+  },
+  "instructions": ["~/.config/opencode/instructions/hyperkb.md"],
+  "permission": {
+    "skill": "allow",
+    "mcp__hyperkb__hkb_search": "allow",
+    "mcp__hyperkb__hkb_show": "allow",
+    "mcp__hyperkb__hkb_add": "allow",
+    "mcp__hyperkb__hkb_update": "allow",
+    "mcp__hyperkb__hkb_task": "allow",
+    "mcp__hyperkb__hkb_sync": "allow",
+    "mcp__hyperkb__hkb_session": "allow",
+    "mcp__hyperkb__hkb_context": "allow",
+    "mcp__hyperkb__hkb_view": "allow",
+    "mcp__hyperkb__hkb_health": "allow"
+  }
+}
