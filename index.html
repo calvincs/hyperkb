@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<!--
+  LLM Reference: This site documents HyperKB, a persistent knowledge base for AI agents.
+  For a machine-readable project summary including install, configuration, MCP tools,
+  file format, scoring pipeline, and license details, see: /llms.txt
+-->
+<html lang="en">
+<head>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-2JQ5F1X1L0"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-2JQ5F1X1L0');
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HyperKB — Memory that makes AI agents smarter over time</title>
+<meta name="description" content="Persistent memory that follows your AI across sessions, instances, and machines. Flat markdown files, SQLite indexing, ripgrep speed. Open source, no vendor lock-in.">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="HyperKB — Memory that makes AI agents smarter over time">
+<meta property="og:description" content="Persistent memory that follows your AI across sessions, instances, and machines.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://hyperkb.com">
+<link rel="help" type="text/plain" href="llms.txt" title="LLM-readable project reference">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&family=Oxanium:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cyan: #00D4FF;
+    --cyan-dim: rgba(0,212,255,0.10);
+    --cyan-mid: rgba(0,212,255,0.30);
+    --bg: #050810;
+    --bg2: #080d1a;
+    --bg3: #0d1325;
+    --text: #e8eaf2;
+    --text-dim: #6b7280;
+    --text-mid: #9ca3af;
+    --border: rgba(0,212,255,0.15);
+    --border-dim: rgba(255,255,255,0.06);
+    --mono: 'Space Mono', monospace;
+    --sans: 'Syne', sans-serif;
+    --display: 'Oxanium', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    overflow-x: hidden;
+    line-height: 1.6;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border-dim) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border-dim) 1px, transparent 1px);
+    background-size: 60px 60px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    top: -20vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 900px;
+    height: 600px;
+    background: radial-gradient(ellipse at center, rgba(0,212,255,0.07) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  section, nav, footer { position: relative; z-index: 1; }
+
+  /* ── NAV ── */
+  nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem 4rem;
+    border-bottom: 1px solid var(--border-dim);
+    backdrop-filter: blur(12px);
+    background: rgba(5,8,16,0.7);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .nav-logo {
+    font-family: var(--mono);
+    font-size: 1.1rem;
+    color: var(--cyan);
+    letter-spacing: 0.05em;
+    text-decoration: none;
+  }
+  .nav-logo span { color: var(--text-dim); }
+
+  nav a {
+    color: var(--text-mid);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition: color 0.2s;
+  }
+  nav a:hover { color: var(--cyan); }
+
+  .nav-links { display: flex; gap: 2.5rem; align-items: center; }
+
+  .btn-nav {
+    background: var(--cyan-dim);
+    border: 1px solid var(--cyan-mid);
+    color: var(--cyan);
+    padding: 0.5rem 1.2rem;
+    border-radius: 4px;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .btn-nav:hover {
+    background: rgba(0,212,255,0.2);
+    box-shadow: 0 0 20px rgba(0,212,255,0.2);
+  }
+
+  /* ── HERO ── */
+  .hero {
+    min-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 5rem 2rem 3rem;
+  }
+
+  .hero-badge {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    background: var(--cyan-dim);
+    border: 1px solid var(--border);
+    padding: 0.4rem 1rem;
+    border-radius: 100px;
+    margin-bottom: 2.5rem;
+    animation: fadeDown 0.8s ease both;
+  }
+
+  .hero h1 {
+    font-family: var(--display);
+    font-size: clamp(3.2rem, 7.5vw, 6.5rem);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.02em;
+    margin-bottom: 1.5rem;
+    animation: fadeDown 0.8s 0.1s ease both;
+  }
+
+  .hero h1 em {
+    font-style: normal;
+    background: linear-gradient(135deg, var(--cyan) 0%, #7b8fff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-sub {
+    font-size: clamp(1rem, 2vw, 1.15rem);
+    color: var(--text-mid);
+    max-width: 500px;
+    margin: 0 auto 2.5rem;
+    line-height: 1.75;
+    animation: fadeDown 0.8s 0.2s ease both;
+  }
+
+  .hero-ctas {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    animation: fadeDown 0.8s 0.3s ease both;
+  }
+
+  .btn-primary {
+    background: var(--cyan);
+    color: #050810;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.85rem 2rem;
+    border-radius: 4px;
+    text-decoration: none;
+    transition: box-shadow 0.2s, transform 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .btn-primary:hover {
+    box-shadow: 0 0 30px rgba(0,212,255,0.4);
+    transform: translateY(-1px);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 0.85rem 2rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-dim);
+    text-decoration: none;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .btn-secondary:hover {
+    border-color: var(--border);
+    color: var(--cyan);
+  }
+
+  /* ── TRUST BADGES ── */
+  .trust-row {
+    display: flex;
+    justify-content: center;
+    gap: 2.5rem;
+    flex-wrap: wrap;
+    margin-top: 2rem;
+    animation: fadeDown 0.8s 0.4s ease both;
+  }
+
+  .trust-item {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .trust-item::before {
+    content: '✓ ';
+    color: var(--cyan);
+  }
+
+  /* ── TERMINAL ── */
+  .hero-terminal {
+    margin-top: 4rem;
+    width: 100%;
+    max-width: 680px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.6), 0 0 60px rgba(0,212,255,0.06);
+    animation: fadeUp 1s 0.5s ease both;
+  }
+
+  .terminal-bar {
+    background: var(--bg3);
+    padding: 0.7rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border-dim);
+  }
+
+  .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .dot-r { background: #ff5f57; }
+  .dot-y { background: #febc2e; }
+  .dot-g { background: #28c840; }
+
+  .terminal-title {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .terminal-body {
+    padding: 1.25rem 1.75rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 2;
+    text-align: left;
+    overflow-x: auto;
+  }
+
+  .t-prompt { color: var(--cyan); }
+  .t-cmd    { color: var(--text); }
+  .t-out    { color: var(--text-dim); }
+  .t-hi     { color: #7b8fff; }
+  .t-val    { color: #ffd700; }
+  .t-ok     { color: #28c840; }
+  .t-user   { color: #c084fc; }
+
+  .cursor {
+    display: inline-block;
+    width: 8px; height: 14px;
+    background: var(--cyan);
+    vertical-align: middle;
+    animation: blink 1.1s step-end infinite;
+  }
+
+  /* ── SHARED ── */
+  .section-label {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin-bottom: 1rem;
+    display: block;
+  }
+
+  h2 {
+    font-family: var(--display);
+    font-size: clamp(2rem, 4vw, 3rem);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    line-height: 1.1;
+    margin-bottom: 1.25rem;
+  }
+
+  .section-sub {
+    font-size: 1rem;
+    color: var(--text-mid);
+    max-width: 550px;
+    line-height: 1.75;
+  }
+
+  .divider {
+    max-width: 1200px;
+    margin: 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+  }
+
+  /* ── HOW YOU USE IT ── */
+  .how {
+    padding: 8rem 4rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 1.15fr;
+    gap: 5rem;
+    align-items: center;
+  }
+
+  .diagram-box {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem 1.75rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.9;
+    color: var(--text-mid);
+    position: relative;
+  }
+
+  .diagram-box::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 10px;
+    box-shadow: 0 0 40px rgba(0,212,255,0.08);
+    pointer-events: none;
+  }
+
+  .d-title {
+    color: var(--cyan);
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  .d-arrow { color: var(--text-dim); }
+  .d-label { color: #7b8fff; }
+  .d-note  { color: var(--text-dim); font-size: 0.7rem; }
+
+  /* ── ARCHITECTURE CARDS ── */
+  .arch {
+    padding: 8rem 4rem;
+    background: linear-gradient(180deg, transparent 0%, var(--bg2) 15%, var(--bg2) 85%, transparent 100%);
+  }
+
+  .arch-inner { max-width: 1200px; margin: 0 auto; }
+  .arch-header { margin-bottom: 4rem; }
+
+  .arch-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.5px;
+    background: var(--border-dim);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .arch-card {
+    background: var(--bg2);
+    padding: 2.25rem;
+    transition: background 0.25s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .arch-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--cyan-mid), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+
+  .arch-card:hover { background: var(--bg3); }
+  .arch-card:hover::before { opacity: 1; }
+
+  .arch-card h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+    color: var(--text);
+  }
+
+  .arch-card p {
+    font-size: 0.88rem;
+    color: var(--text-mid);
+    line-height: 1.6;
+  }
+
+  .arch-card code {
+    font-family: var(--mono);
+    font-size: 0.8em;
+    color: var(--cyan);
+    background: var(--cyan-dim);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+
+  /* ── SYNC ── */
+  .sync {
+    padding: 8rem 4rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 1.15fr;
+    gap: 5rem;
+    align-items: center;
+  }
+
+  .sync-providers {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1.5rem;
+  }
+
+  .sync-chip {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    color: var(--text-mid);
+    background: var(--bg3);
+    border: 1px solid var(--border-dim);
+    padding: 0.3rem 0.75rem;
+    border-radius: 4px;
+  }
+
+  .sync-diagram {
+    display: block;
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    box-shadow: 0 0 40px rgba(0,212,255,0.08);
+  }
+
+  /* ── INSTALL ── */
+  .install {
+    padding: 8rem 4rem;
+  }
+
+  .install-inner {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .install-header { margin-bottom: 3rem; }
+
+  pre {
+    background: var(--bg3);
+    border: 1px solid var(--border-dim);
+    border-radius: 6px;
+    padding: 1.25rem 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    overflow-x: auto;
+    line-height: 2;
+  }
+
+  pre .c { color: var(--text-dim); }
+  pre .k { color: var(--cyan); }
+  pre .s { color: #ffd700; }
+  pre .p { color: #7b8fff; }
+
+  .install-blocks {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .install-block-label {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 0.6rem;
+  }
+
+  .install-note {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.7;
+    margin-top: 1.5rem;
+  }
+
+  .install-note a {
+    color: var(--cyan);
+    text-decoration: none;
+  }
+  .install-note a:hover { text-decoration: underline; }
+
+  /* ── OS TABS ── */
+  .os-input { display: none; }
+
+  .os-tab-bar {
+    display: flex;
+    margin-bottom: 0.75rem;
+  }
+
+  .os-tab-label {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    padding: 0.35rem 1rem;
+    cursor: pointer;
+    border: 1px solid var(--border-dim);
+    color: var(--text-dim);
+    background: var(--bg3);
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+
+  .os-tab-label:first-of-type { border-radius: 4px 0 0 4px; }
+  .os-tab-label:last-of-type  { border-radius: 0 4px 4px 0; border-left: none; }
+
+  .os-switcher:has(#os-mac:checked)   label[for="os-mac"],
+  .os-switcher:has(#os-linux:checked) label[for="os-linux"] {
+    color: var(--cyan);
+    background: var(--cyan-dim);
+    border-color: var(--border);
+  }
+
+  .os-switcher:has(#os-mac:checked)   .os-content-linux { display: none; }
+  .os-switcher:has(#os-linux:checked) .os-content-mac   { display: none; }
+
+  /* ── CTA ── */
+  .cta-section {
+    padding: 8rem 2rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .cta-section::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 400px;
+    background: radial-gradient(ellipse at center bottom, rgba(0,212,255,0.15) 0%, rgba(123,143,255,0.05) 45%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .cta-inner { position: relative; z-index: 1; }
+
+  .cta-section h2 {
+    font-size: clamp(2.2rem, 4.5vw, 3.5rem);
+    margin-bottom: 1.5rem;
+  }
+
+  .cta-section p {
+    font-size: 1rem;
+    color: var(--text-mid);
+    margin-bottom: 2.5rem;
+    max-width: 440px;
+    margin-left: auto;
+    margin-right: auto;
+    line-height: 1.75;
+  }
+
+  /* ── FOOTER ── */
+  footer {
+    border-top: 1px solid var(--border-dim);
+    padding: 2.5rem 4rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .footer-logo {
+    font-family: var(--mono);
+    font-size: 0.9rem;
+    color: var(--text-dim);
+  }
+  .footer-logo strong { color: var(--cyan); }
+
+  .footer-links { display: flex; gap: 2rem; }
+
+  .footer-links a {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    text-decoration: none;
+    letter-spacing: 0.05em;
+    transition: color 0.2s;
+  }
+  .footer-links a:hover { color: var(--cyan); }
+
+  .footer-note {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    opacity: 0.5;
+  }
+
+  /* ── ANIMATIONS ── */
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(24px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+  }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 960px) {
+    nav { padding: 1.25rem 1.5rem; }
+    .nav-links { gap: 1.25rem; }
+    .hero { padding: 3rem 1.5rem 2rem; min-height: auto; }
+    .how { grid-template-columns: 1fr; gap: 3rem; padding: 5rem 1.5rem; }
+    .arch { padding: 5rem 1.5rem; }
+    .arch-grid { grid-template-columns: 1fr; }
+    .sync { grid-template-columns: 1fr; gap: 3rem; padding: 5rem 1.5rem; }
+    .install { padding: 5rem 1.5rem; }
+    .cta-section { padding: 5rem 1.5rem; }
+    h2 { font-size: 2rem; }
+    footer { flex-direction: column; text-align: center; padding: 2rem 1.5rem; }
+    .footer-links { gap: 1.25rem; flex-wrap: wrap; justify-content: center; }
+    .trust-row { gap: 1.5rem; }
+    .diagram-box { overflow-x: auto; }
+  }
+
+  @media (max-width: 540px) {
+    .nav-links { gap: 0.75rem; }
+    .nav-links a:not(.btn-nav) { display: none; }
+    .hero h1 { font-size: 2.5rem; }
+    .hero-sub { font-size: 0.95rem; }
+    .hero-terminal { margin-top: 2.5rem; }
+    .terminal-body { padding: 1rem 1.25rem; font-size: 0.72rem; }
+    .how, .sync { padding: 4rem 1.25rem; gap: 2rem; }
+    .arch { padding: 4rem 1.25rem; }
+    .arch-card { padding: 1.5rem; }
+    .install { padding: 4rem 1.25rem; }
+    .cta-section { padding: 4rem 1.25rem; }
+    .btn-primary, .btn-secondary { padding: 0.75rem 1.5rem; font-size: 0.8rem; }
+    .trust-row { gap: 1rem; }
+    .trust-item { font-size: 0.62rem; }
+    .section-sub { font-size: 0.92rem; }
+    .diagram-box { font-size: 0.7rem; padding: 1.25rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="index.html#" class="nav-logo">▸ HyperKB</a>
+  <div class="nav-links">
+    <a href="index.html#architecture">Architecture</a>
+    <a href="index.html#install">Install</a>
+    <a href="https://github.com/calvincs/hyperkb" class="btn-nav" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <span class="hero-badge">v2.0.1 · MCP-native · Python 3.10+</span>
+  <h1>Memory that makes<br><em>AI agents</em><br>smarter over time.</h1>
+  <p class="hero-sub">Persistent memory that follows your AI across sessions, instances, and machines.</p>
+  <div class="hero-ctas">
+    <a href="index.html#install" class="btn-primary">Get started →</a>
+    <a href="https://github.com/calvincs/hyperkb" class="btn-secondary" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  </div>
+  <div class="trust-row">
+    <span class="trust-item">Open source</span>
+    <span class="trust-item">No vendor lock-in</span>
+    <span class="trust-item">Human-readable</span>
+    <span class="trust-item">MCP-native</span>
+  </div>
+
+  <div class="hero-terminal">
+    <div class="terminal-bar">
+      <div class="dot dot-r"></div>
+      <div class="dot dot-y"></div>
+      <div class="dot dot-g"></div>
+      <span class="terminal-title">terminal</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="t-prompt">❯ </span><span class="t-cmd">/rem the postgres pool exhausts at 50+ concurrent req/s</span></div>
+      <div><span class="t-out">  </span><span class="t-ok">✓</span><span class="t-out"> Saved → </span><span class="t-hi">infra.postgres</span><span class="t-out">#</span><span class="t-val">1742389200</span></div>
+      <div>&nbsp;</div>
+      <div><span class="t-user">user:</span> <span class="t-cmd">what do I know about connection pooling?</span></div>
+      <div><span class="t-out">  Found </span><span class="t-val">3</span><span class="t-out"> entries across </span><span class="t-val">2</span><span class="t-out"> files...</span></div>
+      <div><span class="t-out">  </span><span class="t-hi">infra.postgres</span><span class="t-out"> — "Pool exhausts at 50+ req/s" </span><span class="t-ok">(2d ago)</span></div>
+      <div><span class="t-out">  </span><span class="t-hi">infra.redis</span><span class="t-out"> — "Redis maxes at 10k connections" </span><span class="t-ok">(1w ago)</span></div>
+      <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- HOW YOU USE IT -->
+<section>
+  <div class="how">
+    <div>
+      <span class="section-label">// how you use it</span>
+      <h2>You talk.<br>It remembers.</h2>
+      <p class="section-sub">Save anything with <code style="font-family:var(--mono);color:var(--cyan);background:var(--cyan-dim);padding:0.1em 0.4em;border-radius:3px;font-size:0.9em">/rem</code> or just tell your AI what to remember in plain language. Ask questions later and the right context surfaces automatically.</p>
+      <p class="section-sub" style="margin-top:1.25rem;">You never need to learn the underlying tools. Crafted skill files teach AI agents when to search, when to save, and how to route entries to the right file — so you just talk.</p>
+      <p class="section-sub" style="margin-top:1rem;color:var(--text-dim);">No database to migrate. No vendor to depend on. Delete the index and rebuild it in seconds.</p>
+    </div>
+    <div class="diagram-box">
+      <div class="d-title">// flow</div>
+      <div><span style="color:var(--text)">You</span></div>
+      <div><span class="d-arrow">  ├──</span> <span class="d-label">/rem &lt;finding&gt;</span> <span class="d-note">── quick save</span></div>
+      <div><span class="d-arrow">  └──</span> <span class="d-label">"remember that..."</span> <span class="d-note">── natural chat</span></div>
+      <div>&nbsp;</div>
+      <div><span class="d-arrow">  ↓</span></div>
+      <div>&nbsp;</div>
+      <div><span style="color:#ffd700">AI Agent</span> <span class="d-note">(learns via skill files)</span></div>
+      <div><span class="d-arrow">  ├──</span> <span class="d-note">knows when to search vs save</span></div>
+      <div><span class="d-arrow">  └──</span> <span class="d-note">routes to the right file automatically</span></div>
+      <div>&nbsp;</div>
+      <div><span class="d-arrow">  ↓</span></div>
+      <div>&nbsp;</div>
+      <div><span style="color:var(--text)">~/.hkb/storage/</span></div>
+      <div><span class="d-arrow">  ├──</span> <span class="d-label">project.architecture.md</span></div>
+      <div><span class="d-arrow">  ├──</span> <span class="d-label">infra.postgres.md</span></div>
+      <div><span class="d-arrow">  └──</span> <span class="d-label">security.threat-intel.md</span></div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- UNDER THE HOOD -->
+<section class="arch" id="architecture">
+  <div class="arch-inner">
+    <div class="arch-header">
+      <span class="section-label">// under the hood</span>
+      <h2>Proven tech, not reinvented.</h2>
+      <p class="section-sub">Four architecture decisions that make it work — built on tools that already exist and already scale.</p>
+    </div>
+    <div class="arch-grid">
+
+      <div class="arch-card">
+        <h3>Dot Namespaces</h3>
+        <p><code>domain.topic.subtopic.md</code> replaces folder hierarchy. The first segment is your project for natural filtering. Two to four segments: <code>infra.postgres</code>, <code>security.threat-intel</code>, <code>project.architecture.decisions</code>.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>Hybrid Search</h3>
+        <p>Ripgrep for exact and regex matches — the fastest grep on earth. BM25 via SQLite FTS5 for keyword ranking. Results are merged, deduplicated, and scored. Configurable weights, no custom search engine.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>Append-Only Entries</h3>
+        <p>Entries are never mutated — only appended with epoch timestamps. The markdown files are the source of truth, not the index. Delete the SQLite database and rebuild it in seconds.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>Smart Scoring</h3>
+        <p>A 9-stage pipeline ranks every result: recency decay, staleness penalties, type and status boosts. Decisions and high-weight entries never go stale. The best match always surfaces first.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- WHY HYPERKB -->
+<section class="arch" id="why">
+  <div class="arch-inner">
+    <div class="arch-header">
+      <span class="section-label" style="text-transform:none">// why HyperKB</span>
+      <h2>Built different<br>where it matters.</h2>
+      <p class="section-sub">Most AI memory tools trade durability for convenience. HyperKB doesn't make you choose.</p>
+    </div>
+    <div class="arch-grid">
+
+      <div class="arch-card">
+        <h3>Files You Can Actually Read</h3>
+        <p>Your knowledge lives in <code>infra.postgres.md</code>, not <code>a3f2b8c9.json</code>. Open any file in any editor. Read it without the tool — today, five years from now. No database required to access your own data.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>Search That Ranks, Not Just Matches</h3>
+        <p>A 9-stage scoring pipeline with recency decay, staleness penalties, type boosts, and session anchoring. The best result surfaces first — not just the newest, not just a substring match.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>Context Your AI Can Use</h3>
+        <p>Token-budgeted retrieval packs exactly what fits. Session briefings orient the agent on startup. Topic anchoring biases ongoing searches. Your AI gets signal, not noise.</p>
+      </div>
+
+      <div class="arch-card">
+        <h3>No Lock-In, Ever</h3>
+        <p>SQLite is a rebuildable cache, not a prison. Delete it and rebuild in seconds. Sync across machines with git-backed three-way merge over S3. Your markdown files are always yours, always portable.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- SYNC EVERYWHERE -->
+<section>
+  <div class="sync" id="sync">
+    <div>
+      <span class="section-label">// sync everywhere</span>
+      <h2>One KB,<br>every machine.</h2>
+      <p class="section-sub">S3-compatible sync with git-backed three-way merge. Your knowledge base follows you across machines and AI sessions — encrypted credentials at rest, conflict resolution built in.</p>
+      <div class="sync-providers">
+        <span class="sync-chip">AWS S3</span>
+        <span class="sync-chip">MinIO</span>
+        <span class="sync-chip">Backblaze B2</span>
+        <span class="sync-chip">Any S3-compatible</span>
+      </div>
+    </div>
+    <img src="hcxamohcxamohcxa.png" alt="Sync topology: two machines pushing and pulling from an encrypted S3 bucket with three-way merge" class="sync-diagram">
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- INSTALL -->
+<section class="install" id="install">
+  <div class="install-inner">
+    <div class="install-header">
+      <span class="section-label">// get started</span>
+      <h2>Installs in minutes.</h2>
+    </div>
+
+    <div class="install-blocks">
+
+      <div>
+        <div class="install-block-label">1 — Install</div>
+        <div class="os-switcher">
+          <input type="radio" name="os" id="os-mac" class="os-input" checked>
+          <input type="radio" name="os" id="os-linux" class="os-input">
+          <div class="os-tab-bar">
+            <label for="os-mac" class="os-tab-label">macOS</label>
+            <label for="os-linux" class="os-tab-label">Linux</label>
+          </div>
+          <pre class="os-content-mac"><span class="k">brew</span> install ripgrep
+<span class="k">git</span> clone https://github.com/calvincs/hyperkb ~/src/hyperkb
+<span class="k">python3</span> -m venv ~/.hkb/venv
+~/.hkb/venv/bin/<span class="k">pip</span> install -e <span class="s">"~/src/hyperkb[all]"</span>
+<span class="k">export</span> PATH=<span class="s">"$HOME/.hkb/venv/bin:$PATH"</span>  <span class="c"># add to ~/.zshrc</span>
+<span class="k">hkb</span> init</pre>
+          <pre class="os-content-linux"><span class="k">sudo apt</span> install ripgrep    <span class="c"># or: dnf, cargo</span>
+<span class="k">git</span> clone https://github.com/calvincs/hyperkb ~/src/hyperkb
+<span class="k">python3</span> -m venv ~/.hkb/venv
+~/.hkb/venv/bin/<span class="k">pip</span> install -e <span class="s">"~/src/hyperkb[all]"</span>
+<span class="k">export</span> PATH=<span class="s">"$HOME/.hkb/venv/bin:$PATH"</span>  <span class="c"># add to ~/.bashrc</span>
+<span class="k">hkb</span> init</pre>
+        </div>
+      </div>
+
+      <div>
+        <div class="install-block-label">2 — Register the MCP server</div>
+        <pre><span class="c">// Add to ~/.claude/.mcp.json (or project .mcp.json)</span>
+{
+  <span class="p">"mcpServers"</span>: {
+    <span class="p">"hyperkb"</span>: {
+      <span class="p">"command"</span>: <span class="s">"~/.hkb/venv/bin/hkb-mcp"</span>
+    }
+  }
+}</pre>
+      </div>
+
+      <p class="install-note">
+        Restart Claude Code and approve the MCP server when prompted. The skill files teach your AI agent how to use the KB automatically.<br>
+        For permissions, skill files, and OpenCode setup, see the <a href="https://github.com/calvincs/hyperkb/blob/main/README.md" target="_blank" rel="noopener noreferrer">full setup guide →</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-inner">
+    <h2>Give your AI<br>a memory worth keeping.</h2>
+    <p>Plain markdown you can read without the tool — today, five years from now, always.</p>
+    <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;">
+      <a href="https://github.com/calvincs/hyperkb" class="btn-primary" target="_blank" rel="noopener noreferrer">★ View on GitHub</a>
+      <a href="https://github.com/calvincs/hyperkb/blob/main/README.md" class="btn-secondary" target="_blank" rel="noopener noreferrer">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-logo"><strong>▸ HyperKB</strong></div>
+  <div class="footer-links">
+    <a href="https://github.com/calvincs/hyperkb" target="_blank" rel="noopener noreferrer">GitHub</a>
+    <a href="https://github.com/calvincs/hyperkb/blob/main/README.md" target="_blank" rel="noopener noreferrer">Docs</a>
+    <a href="https://github.com/calvincs/hyperkb/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
+    <a href="https://github.com/calvincs/hyperkb/issues" target="_blank" rel="noopener noreferrer">Issues</a>
+    <a href="llms.txt">llms.txt</a>
+  </div>
+  <div class="footer-note">v2.0.1 · Python 3.10+ · ripgrep · © 2026 HyperKB</div>
+</footer>
+
+</body>
+</html>
