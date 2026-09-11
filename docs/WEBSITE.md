@@ -37,4 +37,4 @@ The CI workflow validates the application and website and uploads the generated 
 
 ## Keep claims accurate
 
-The walkthrough is an illustration, not a connected live MCP client. Avoid implying automatic capture of all conversations, model-specific token limits, a hosted shared HTTP server, vector search, or an external model requirement. New sync manifests require coordinated upgrades; maintain that notice with the implementation.
+The walkthrough is an illustration, not a connected live MCP client. Avoid implying automatic capture of all conversations, model-specific token limits, a hosted shared HTTP server, vector search, or an external model requirement. Keep protocol warnings and migration instructions aligned with the implementation: local recording continues while remote sync is paused, and clients predating the checks need one coordinated upgrade.

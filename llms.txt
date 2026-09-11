@@ -33,5 +33,6 @@ HTTP MCP endpoint in this project.
 
 Local search needs no model API key. Context token counts are estimates, not a
 specific model tokenizer's count. Entries can be amended, so storage is not an
-immutable audit log. Upgrade every client sharing a bucket before publishing a
-version 2 sync manifest; old clients do not understand immutable blob references.
+immutable audit log. Remote sync requires matching S3 protocol versions; local
+work continues during outages and mismatches, with pending edits preserved for
+reconciliation after upgrade. See the sync guide for the explicit migration.

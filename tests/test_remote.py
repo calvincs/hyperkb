@@ -107,6 +107,7 @@ class TestManifest:
 
     def test_put_and_get_manifest(self, remote):
         manifest = {
+            "version": 2,
             "files": {
                 "test.md": {"sha256": "abc123", "size": 42},
             },
@@ -134,6 +135,7 @@ class TestManifest:
     def test_rebuild_manifest_stores_to_s3(self, remote):
         remote.upload_file("x.md", b"data")
         remote.rebuild_manifest()
+        remote.upgrade_protocol()
 
         # Should be readable via get_manifest
         manifest = remote.get_manifest()
@@ -263,3 +265,203 @@ class TestSdkContract:
         model = botocore.session.get_session().get_service_model("s3")
         assert {"IfMatch", "IfNoneMatch"} <= set(model.operation_model("PutObject").input_shape.members)
         assert "IfMatch" in model.operation_model("DeleteObject").input_shape.members
+
+
+def _metadata(remote, name, value):
+    remote._client.put_object(Bucket=remote.bucket, Key=remote._sync_key(name),
+                              Body=json.dumps(value).encode())
+
+
+class TestProtocolFence:
+    def test_empty_check_is_read_only(self, remote):
+        with patch.object(remote._client, "put_object") as put, patch.object(remote._client, "delete_object") as delete:
+            assert remote.check_protocol() == {"protocol_version": 2, "marker_present": False}
+        put.assert_not_called()
+        delete.assert_not_called()
+
+    def test_ready_marker_uses_one_get_and_ignores_manifest_body(self, remote):
+        _metadata(remote, "protocol.json", {"protocol_version": 2})
+        _metadata(remote, "manifest.json", {"version": 2, "files": "large opaque body"})
+        with patch.object(remote._protocol_client, "get_object", wraps=remote._protocol_client.get_object) as get:
+            assert remote.check_protocol() == {"protocol_version": 2, "marker_present": True}
+        assert get.call_count == 1
+        assert get.call_args.kwargs["Key"].endswith("protocol.json")
+
+    @pytest.mark.parametrize("version,status", [(1, "store_upgrade_required"), (3, "upgrade_required"),
+                                               (True, "protocol_unverified"), (2.0, "protocol_unverified")])
+    def test_marker_requires_exact_version(self, remote, version, status):
+        from hyperkb.protocol import ProtocolError
+        _metadata(remote, "protocol.json", {"protocol_version": version, "state": "unknown"})
+        with pytest.raises(ProtocolError) as error:
+            remote.check_protocol()
+        assert error.value.status == status
+
+    def test_legacy_manifest_requires_explicit_migration(self, remote):
+        from hyperkb.protocol import ProtocolError
+        _metadata(remote, "manifest.json", {"files": {}})
+        with pytest.raises(ProtocolError) as error:
+            remote.check_protocol()
+        assert error.value.status == "store_upgrade_required"
+        _metadata(remote, "manifest.json", {"version": 2, "files": {}})
+        assert remote.check_protocol() == {"protocol_version": 2, "marker_present": False}
+
+    @pytest.mark.parametrize("key", ["storage/lost.md", "_sync/objects/lost"])
+    def test_missing_inventory_with_objects_fails_closed(self, remote, key):
+        from hyperkb.protocol import ProtocolError
+        remote._client.put_object(Bucket=remote.bucket, Key=remote._key(key), Body=b"source")
+        with pytest.raises(ProtocolError) as error:
+            remote.check_protocol()
+        assert error.value.status == "protocol_unverified"
+
+    def test_ensure_requires_lease_and_seeds_marker(self, remote):
+        from hyperkb.protocol import ProtocolError
+        with pytest.raises(ProtocolError):
+            remote.ensure_protocol()
+        assert remote.acquire_lock()
+        try:
+            assert remote.ensure_protocol() == {"protocol_version": 2, "marker_present": True}
+        finally:
+            remote.release_lock()
+
+    def test_ensure_checks_manifest_header_even_with_ready_marker(self, remote):
+        from hyperkb.protocol import ProtocolError
+        _metadata(remote, "protocol.json", {"protocol_version": 2, "state": "ready"})
+        _metadata(remote, "manifest.json", {"version": 3, "future_body": []})
+        assert remote.acquire_lock()
+        try:
+            with pytest.raises(ProtocolError) as error:
+                remote.ensure_protocol()
+            assert error.value.status == "upgrade_required"
+            with pytest.raises(ProtocolError) as error:
+                remote.get_manifest()
+            assert error.value.status == "upgrade_required"
+        finally:
+            remote.release_lock()
+
+    def test_marker_create_race_rechecks_winning_version(self, remote):
+        from hyperkb.protocol import ProtocolError
+        write = remote._write_protocol
+        def race(state, etag):
+            _metadata(remote, "protocol.json", {"protocol_version": 3})
+            return write(state, etag)
+        assert remote.acquire_lock()
+        try:
+            with patch.object(remote, "_write_protocol", side_effect=race), pytest.raises(ProtocolError) as error:
+                remote.ensure_protocol()
+            assert error.value.status == "upgrade_required"
+        finally:
+            remote.release_lock()
+
+    def test_transport_outage_distinct_from_auth_and_malformed_metadata(self, remote):
+        from botocore.exceptions import EndpointConnectionError, ClientError
+        from hyperkb.protocol import ProtocolError, ProtocolUnavailable
+        with patch.object(remote._protocol_client, "get_object", side_effect=EndpointConnectionError(endpoint_url="https://example.invalid")):
+            with pytest.raises(ProtocolUnavailable):
+                remote.check_protocol()
+        for status, code, expected in [(503, "ServiceUnavailable", ProtocolUnavailable), (403, "AccessDenied", ProtocolError)]:
+            failure = ClientError({"Error": {"Code": code, "Message": "sensitive details"},
+                                   "ResponseMetadata": {"HTTPStatusCode": status}}, "GetObject")
+            with patch.object(remote._protocol_client, "get_object", side_effect=failure), pytest.raises(expected) as error:
+                remote.check_protocol()
+            assert type(error.value) is expected
+            assert "sensitive details" not in str(error.value)
+        remote._client.put_object(Bucket=remote.bucket, Key=remote._sync_key("protocol.json"), Body=b"invalid json")
+        with pytest.raises(ProtocolError) as error:
+            remote.check_protocol()
+        assert not isinstance(error.value, ProtocolUnavailable)
+
+
+class TestProtocolMigration:
+    @staticmethod
+    def legacy(remote):
+        value = {"files": {"legacy.md": {"sha256": "a" * 64, "size": 12},
+                           "blob.md": {"sha256": "b" * 64, "blob": "b" * 64}},
+                 "tombstones": {"gone.md": {"sha256": "c" * 64, "blob": "c" * 64}},
+                 "custom_inventory_metadata": {"preserve": True}}
+        _metadata(remote, "manifest.json", value)
+        return value
+
+    def test_migration_preserves_inventory_and_is_idempotent(self, remote):
+        old = self.legacy(remote)
+        result = remote.upgrade_protocol()
+        current = remote.get_manifest()
+        assert current["version"] == 2
+        for key, value in old.items():
+            assert current[key] == value
+        assert result["transformation"] == {"from_protocol_version": 1, "to_protocol_version": 2,
+            "markdown_changed": False, "files_preserved": 2, "tombstones_preserved": 1,
+            "blob_references_preserved": 2}
+        assert remote.upgrade_protocol()["upgraded"] is False
+
+    def test_dry_run_does_not_acquire_lease_or_write(self, remote):
+        self.legacy(remote)
+        with patch.object(remote, "acquire_lock") as acquire, \
+             patch.object(remote._client, "put_object") as put, \
+             patch.object(remote._client, "delete_object") as delete:
+            plan = remote.upgrade_protocol(dry_run=True)
+        assert plan["status"] == "dry_run"
+        assert plan["transformation"]["files_preserved"] == 2
+        acquire.assert_not_called()
+        put.assert_not_called()
+        delete.assert_not_called()
+
+    @pytest.mark.parametrize("fail_phase", ["manifest", "ready"])
+    def test_interrupted_migration_stays_fenced_and_retry_finishes(self, remote, fail_phase):
+        from hyperkb.protocol import ProtocolError
+        old = self.legacy(remote)
+        write = remote._write_protocol
+        def fail_ready(state, etag):
+            if state == "ready":
+                raise OSError("interrupted")
+            return write(state, etag)
+        target = "put_manifest" if fail_phase == "manifest" else "_write_protocol"
+        failure = OSError("interrupted") if fail_phase == "manifest" else fail_ready
+        with patch.object(remote, target, side_effect=failure), pytest.raises(ProtocolError):
+            remote.upgrade_protocol()
+        with pytest.raises(ProtocolError) as error:
+            remote.check_protocol()
+        assert error.value.status == "protocol_unverified"
+        assert "incomplete" in str(error.value)
+        remote.upgrade_protocol()
+        assert remote.check_protocol()["protocol_version"] == 2
+        current = remote.get_manifest()
+        for key, value in old.items():
+            assert current[key] == value
+
+    def test_future_marker_aborts_before_reading_future_manifest(self, remote):
+        from hyperkb.protocol import ProtocolError
+        _metadata(remote, "protocol.json", {"protocol_version": 3, "state": "new-state"})
+        remote._client.put_object(Bucket=remote.bucket, Key=remote._sync_key("manifest.json"), Body=b"unknown future encoding")
+        with patch.object(remote._client, "put_object") as put, \
+             patch.object(remote._client, "delete_object") as delete, \
+             pytest.raises(ProtocolError) as error:
+            remote.upgrade_protocol()
+        assert error.value.status == "upgrade_required"
+        put.assert_not_called()
+        delete.assert_not_called()
+        assert remote._read_json("protocol.json")[0]["protocol_version"] == 3
+
+    def test_manifest_cas_prevents_lost_inventory_during_migration(self, remote):
+        from hyperkb.protocol import ProtocolError
+        self.legacy(remote)
+        put = remote.put_manifest
+        newer = {"version": 1, "files": {"new.md": {"sha256": "d" * 64}}}
+        def race(value, **kwargs):
+            _metadata(remote, "manifest.json", newer)
+            return put(value, **kwargs)
+        with patch.object(remote, "put_manifest", side_effect=race), pytest.raises(ProtocolError):
+            remote.upgrade_protocol()
+        assert remote._read_json("manifest.json")[0] == newer
+        remote.upgrade_protocol()
+        assert remote.get_manifest()["files"] == newer["files"]
+
+
+def test_protocol_probe_uses_short_timeouts_without_bulk_retries(remote):
+    probe = remote._protocol_client.meta.config
+    bulk = remote._client.meta.config
+    assert (probe.connect_timeout, probe.read_timeout) == (2, 2)
+    assert probe.retries["total_max_attempts"] == 1
+    assert (bulk.connect_timeout, bulk.read_timeout) == (5, 15)
+    assert bulk.retries["total_max_attempts"] == 2
+    assert remote._protocol_client.meta.endpoint_url == remote._client.meta.endpoint_url
+    assert remote._protocol_client.meta.region_name == remote._client.meta.region_name

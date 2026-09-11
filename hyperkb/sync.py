@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from .locking import storage_lock, FileLock
+from .protocol import ProtocolGate, SYNC_PROTOCOL_VERSION, require_matching_protocol
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,7 @@ class SyncEngine:
                 raise InterruptedError("Sync configuration changed; retry with current settings")
         if not self.config.sync_enabled:
             raise InterruptedError("Sync disabled")
+        self._check_protocol()
         if not self.remote.renew_lock():
             raise RuntimeError("Remote sync lease lost")
 
@@ -369,8 +371,13 @@ class SyncEngine:
         finally:
             lock.release()
 
+    def _check_protocol(self):
+        return ProtocolGate(self.config, remote=self.remote).check(allow_offline=False)
+
     def setup(self) -> None:
         with storage_lock(self.storage_dir):
+            self._refresh_config()
+            self._check_protocol()
             self.git.init()
 
     def sync(self, direction: str = "both", dry_run: bool = False) -> dict:
@@ -381,12 +388,7 @@ class SyncEngine:
                 self._refresh_config()
                 if not self.config.sync_enabled or self._cancel_event.is_set():
                     return {"status": "disabled", "direction": direction}
-                self.git.init()
-                self.git.commit_all_pending()
-                dirty = self.storage_dir.parent / "sync" / "reindex-needed"
-                if dirty.exists() and self.reindex_fn:
-                    self.reindex_fn()
-                    dirty.unlink()
+                self._check_protocol()
                 result = self._do_sync(direction, dry_run)
                 self._last_sync_time = time.time()
                 self._last_sync_status = "ok" if dry_run else result["status"]
@@ -460,14 +462,21 @@ class SyncEngine:
             return {"status": "locked", "message": "Another sync holds the remote lease."}
         try:
             if not dry_run:
+                self.remote.ensure_protocol()
                 self._guard()
+                self.git.init()
+                self.git.commit_all_pending()
+                dirty = self.storage_dir.parent / "sync" / "reindex-needed"
+                if dirty.exists() and self.reindex_fn:
+                    self.reindex_fn()
+                    dirty.unlink()
             # Always read inventory after acquiring ownership.
             remote_manifest = self.remote.get_manifest()
             from .remote import S3Remote
             manifest_etag = self.remote.manifest_etag if isinstance(self.remote, S3Remote) else None
-            if (not isinstance(remote_manifest, dict) or type(remote_manifest.get("version", 1)) is not int
-                    or remote_manifest.get("version", 1) not in (1, 2)):
-                raise ValueError("Unsupported remote manifest version")
+            # A missing inventory is an empty destination already verified by
+            # the protocol gate; actual legacy headers require explicit migration.
+            require_matching_protocol(remote_manifest.get("version", SYNC_PROTOCOL_VERSION))
             remote_files = remote_manifest.get("files", {})
             tombstones = remote_manifest.get("tombstones", {})
             if not isinstance(tombstones, dict):
@@ -619,6 +628,7 @@ class SyncEngine:
                 self.remote.release_lock()
 
     def _publish_manifest(self, manifest, expected_etag):
+        self._check_protocol()
         from .remote import S3Remote
         if isinstance(self.remote, S3Remote):
             return self.remote.put_manifest(manifest, expected_etag=expected_etag)

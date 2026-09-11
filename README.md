@@ -78,7 +78,7 @@ The website publishes readable versions of these canonical Markdown guides, incl
 
 ## Upgrading an existing installation
 
-Restart every local MCP client after upgrading. The reliability update uses **sync manifest version 2** with immutable content blobs and deletion records. Upgrade all clients sharing a bucket/prefix before an upgraded client publishes to it; old clients cannot safely read this format. Back up the local Markdown and remote destination first. See [the migration guide](docs/SYNC.md#upgrade-existing-installations-first).
+Restart every local MCP client after upgrading. **Local recording continues during outages and protocol mismatches; remote sync pauses with an upgrade warning.** Clients check the S3 protocol before syncing and preserve pending edits for reconciliation after upgrade. Existing protocol 1 stores have an explicit, previewable migration to protocol 2. Clients predating these checks need one coordinated upgrade first. See [the migration guide](docs/SYNC.md#upgrade-existing-installations-first).
 
 ## Development
 

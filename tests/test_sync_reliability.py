@@ -16,6 +16,7 @@ from hyperkb.conflict import merge_versions
 from hyperkb.format import parse_text
 from hyperkb.locking import storage_lock
 from hyperkb.remote import S3Remote, LOCK_TTL_SECONDS
+from hyperkb.protocol import ProtocolError, ProtocolUnavailable
 from hyperkb.sync import SyncEngine, SyncWorker
 
 
@@ -170,7 +171,7 @@ def test_invalid_download_does_not_change_live_storage(machines, name, content, 
     establish(a, b)
     original = read(b)
     a.remote.upload_file(name, content)
-    a.remote.put_manifest({"files": {name: {"sha256": digest or hashlib.sha256(content).hexdigest()}}})
+    a.remote.put_manifest({"version": 2, "files": {name: {"sha256": digest or hashlib.sha256(content).hexdigest()}}})
     with pytest.raises(ValueError):
         b.sync()
     assert read(b) == original
@@ -421,7 +422,7 @@ def test_protocol_version_and_rebuild_preserve_tombstones(machines):
     client.delete_object(Bucket=a.remote.bucket, Key="hkb/_sync/manifest.json")
     with pytest.raises(ValueError, match="restore"):
         a.remote.rebuild_manifest()
-    with pytest.raises(ValueError, match="restore"):
+    with pytest.raises(ProtocolError, match="manifest is missing"):
         a.remote.get_manifest()
 
 
@@ -444,7 +445,7 @@ def test_unknown_manifest_version_rejected_without_changes(machines):
     old = read(b)
     client.put_object(Bucket=a.remote.bucket, Key="hkb/_sync/manifest.json",
                       Body=json.dumps({"version": 999, "files": {}}).encode())
-    with pytest.raises(ValueError, match="Unsupported"):
+    with pytest.raises(ProtocolError):
         b.sync()
     assert read(b) == old
     assert a.remote.check_lock() is None
@@ -480,7 +481,7 @@ def test_manifest_version_requires_exact_integer(machines, version):
     write(b, document((100, "keep local")))
     client.put_object(Bucket=a.remote.bucket, Key="hkb/_sync/manifest.json",
                       Body=json.dumps({"version": version, "files": {}}).encode())
-    with pytest.raises(ValueError, match="Unsupported"):
+    with pytest.raises(ProtocolError):
         b.sync()
     assert b"keep local" in read(b)
     with pytest.raises(ValueError, match="Unsupported"):
@@ -492,11 +493,12 @@ def test_missing_legacy_manifest_requires_explicit_rebuild(machines):
     remote_bytes = document((100, "unseen legacy remote"))
     a.remote.upload_file("legacy.notes.md", remote_bytes)
     write(a, document((200, "local addition")))
-    with pytest.raises(ValueError, match="rebuild inventory explicitly"):
+    with pytest.raises(ProtocolError, match="rebuild legacy inventory"):
         a.sync()
     assert a.remote.download_file("legacy.notes.md") == remote_bytes
     rebuilt = a.remote.rebuild_manifest()
     assert set(rebuilt["files"]) == {"legacy.notes.md"}
+    a.remote.upgrade_protocol()
     a.sync()
     assert set(a.remote.get_manifest()["files"]) == {"legacy.notes.md", "shared.notes.md"}
     assert read(a, "legacy.notes.md") == remote_bytes
@@ -546,3 +548,68 @@ def test_atomic_sync_write_skips_directory_fsync_on_windows(tmp_path):
         SyncEngine._atomic_write(path, b"complete snapshot")
         sync_os.open.assert_not_called()
     assert path.read_bytes() == b"complete snapshot"
+
+
+def test_sync_protocol_mismatch_precedes_local_git_and_index_mutations(machines):
+    a, _, client = machines
+    before = a.git.get_head_sha()
+    write(a, document((100, "pending local edit")))
+    dirty = a.storage_dir.parent / "sync" / "reindex-needed"
+    dirty.parent.mkdir(exist_ok=True)
+    dirty.write_text("pending")
+    client.put_object(Bucket=a.remote.bucket, Key="hkb/_sync/protocol.json",
+                      Body=json.dumps({"protocol_version": 3}).encode())
+    with patch.object(a, "reindex_fn") as reindex, pytest.raises(ProtocolError):
+        a.sync()
+    assert a.git.get_head_sha() == before
+    assert dirty.exists()
+    assert b"pending local edit" in read(a)
+    reindex.assert_not_called()
+
+
+def test_sync_dry_run_does_not_mutate_git_index_or_remote(machines):
+    a, _, _ = machines
+    before = a.git.get_head_sha()
+    write(a, document((100, "uncommitted")))
+    with patch.object(a.remote._client, "put_object") as put, \
+         patch.object(a.remote._client, "delete_object") as delete, \
+         patch.object(a, "reindex_fn") as reindex:
+        assert a.sync(dry_run=True)["status"] == "dry_run"
+    assert a.git.get_head_sha() == before
+    assert a.git.has_uncommitted_changes()
+    put.assert_not_called()
+    delete.assert_not_called()
+    reindex.assert_not_called()
+
+
+def test_legacy_offline_edits_reconcile_after_explicit_upgrade(machines):
+    from hyperkb.store import KnowledgeStore
+    a, _, _ = machines
+    remote_bytes = document((100, "remote before upgrade"))
+    a.remote.upload_file("shared.notes.md", remote_bytes)
+    a.remote.put_manifest({"files": {"shared.notes.md": {
+        "sha256": hashlib.sha256(remote_bytes).hexdigest(), "size": len(remote_bytes)}}})
+    store = KnowledgeStore(a.config)
+    store.init()
+    try:
+        store.create_file(name="shared.notes", description="Notes", keywords=["notes"])
+        store.add_entry(file_name="shared.notes", content="local recorded while disconnected", epoch=200)
+        with pytest.raises(ProtocolError) as error:
+            a.sync()
+        assert error.value.status == "store_upgrade_required"
+        # A successful store write remains possible while remote sync is fenced.
+        store.add_entry(file_name="shared.notes", content="more local recording", epoch=300)
+        local_before = read(a)
+        plan = a.remote.upgrade_protocol(dry_run=True)
+        assert plan["transformation"]["markdown_changed"] is False
+        a.remote.upgrade_protocol()
+        assert read(a) == local_before
+        a.reindex_fn = store.reindex
+        a.sync()
+        contents = {entry.content for entry in parse_text(read(a).decode())[1]}
+        assert contents == {"remote before upgrade", "local recorded while disconnected", "more local recording"}
+        assert remote_content(a) == read(a)
+        assert store.db.get_entry("shared.notes", 100)["content"] == "remote before upgrade"
+        assert store.db.get_entry("shared.notes", 300)["content"] == "more local recording"
+    finally:
+        store.close()

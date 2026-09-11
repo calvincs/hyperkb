@@ -34,11 +34,13 @@ from pathlib import Path
 from typing import Literal
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from . import __version__
 from .config import KBConfig
 from .format import parse_add_result, parse_time_input, safe_parse_json_list, is_archive_file
 from .store import KnowledgeStore
+from .protocol import ProtocolError, ProtocolGate
 
 
 @dataclass
@@ -51,12 +53,16 @@ class AppContext:
     anchors: list = None  # Session anchor topics
     anchor_files: dict = None  # {file_name: max_score} for anchor boost
     tool_limiter: object | None = None  # Per-client bounded blocking work
+    protocol_gate: object | None = None
+    protocol_warning: str = ""
 
     def __post_init__(self):
         if self.anchors is None:
             self.anchors = []
         if self.anchor_files is None:
             self.anchor_files = {}
+        if self.protocol_gate is None:
+            self.protocol_gate = ProtocolGate(self.store.config)
 
 
 # Parse CLI args before server creation so lifespan can use them.
@@ -100,7 +106,6 @@ def _start_sync_worker(config, store):
             config=config,
             reindex_fn=store.reindex,
         )
-        engine.setup()
         worker = SyncWorker(engine, interval=config.sync_interval)
         worker.start()
         logger.info("Sync worker started (interval=%ds)", config.sync_interval)
@@ -188,11 +193,16 @@ def _open_store(args):
             fresh = True
         store = KnowledgeStore(config)
         try:
+            app_ctx = AppContext(store=store)
+            protocol = app_ctx.protocol_gate.check(allow_local=True)
+            if protocol.get("message"):
+                logger.warning("%s", protocol["message"])
             if fresh:
                 store.init()
             _connect_with_retry(store)
-            return AppContext(store=store, health=store.health_snapshot(),
-                              sync_worker=_start_sync_worker(config, store))
+            app_ctx.health = store.health_snapshot()
+            app_ctx.sync_worker = _start_sync_worker(config, store)
+            return app_ctx
         except BaseException:
             store.close()
             raise
@@ -236,6 +246,10 @@ hyperkb is your persistent knowledge base — long-term memory that survives acr
 10 tools, each with sub-actions where applicable.
 
 START OF SESSION: Call hkb_session(action="briefing") for overview, then hkb_search for targeted lookup.
+If an operation reports upgrade_required or store_upgrade_required, tell the user
+remote sync is paused and follow its recovery instructions. Continue recording and
+retrieving locally; pending edits remain available for reconciliation after upgrade.
+Never disable sync or remove protocol state to bypass a protocol mismatch.
 
 WHEN TO RECORD (proactively): key findings, bugs/root causes, architecture decisions,
 hard-won config values, milestones, procedural skills, resumption context.
@@ -268,19 +282,66 @@ def _blocking_tool():
         @functools.wraps(fn)
         async def dispatch(*args, **kwargs):
             bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
             ctx = bound.arguments.get("ctx")
             app_ctx = ctx.request_context.lifespan_context
             if app_ctx.tool_limiter is None:
                 app_ctx.tool_limiter = anyio.CapacityLimiter(4)
             # Do not abandon an in-flight write on cancellation: cleanup must
             # wait for it to finish before closing its store connection.
-            return await anyio.to_thread.run_sync(
-                functools.partial(fn, *args, **kwargs), limiter=app_ctx.tool_limiter,
-            )
+            failure = None
+            try:
+                result = await anyio.to_thread.run_sync(
+                    functools.partial(_run_guarded_tool, fn, bound, app_ctx),
+                    limiter=app_ctx.tool_limiter,
+                )
+            except ProtocolError as error:
+                failure = error
+            state = app_ctx.protocol_gate.state
+            warning = state.get("message", "")
+            if warning and warning != app_ctx.protocol_warning:
+                app_ctx.protocol_warning = warning
+                logger.warning("%s", warning)
+                try:
+                    await ctx.warning(warning)
+                except Exception:
+                    pass  # The tool response still carries the actionable error.
+            elif not warning:
+                app_ctx.protocol_warning = ""
+            if failure is not None:
+                raise ToolError(json.dumps(failure.as_dict())) from failure
+            return result
 
         mcp_server.tool()(dispatch)
         return fn
     return register
+
+
+def _run_guarded_tool(fn, bound, app_ctx):
+    """Check every request, fencing remote sync while preserving local work."""
+    action = bound.arguments.get("action")
+    config_action = fn.__name__ == "hkb_sync" and action == "config"
+    remote_action = fn.__name__ == "hkb_sync" and action in ("push", "pull", "both")
+    if config_action:
+        # Configuration is a recovery control, including fixing credentials.
+        result = fn(*bound.args, **bound.kwargs)
+        app_ctx.protocol_gate.check(allow_local=True)
+        return _with_protocol_notice(result, app_ctx.protocol_gate.state)
+    app_ctx.protocol_gate.check(allow_offline=not remote_action, allow_local=not remote_action)
+    return _with_protocol_notice(fn(*bound.args, **bound.kwargs), app_ctx.protocol_gate.state)
+
+
+def _with_protocol_notice(result, state):
+    """Carry warnings in tool content even when clients ignore log messages."""
+    if not state.get("blocked"):
+        return result
+    parsed = json.loads(result)
+    if isinstance(parsed, dict):
+        # Packed context already included its notice in the response budget.
+        parsed.setdefault("_protocol", state)
+    else:
+        parsed = {"result": parsed, "_protocol": state}
+    return json.dumps(parsed, indent=2)
 
 
 def _get_store(ctx: Context) -> KnowledgeStore:
@@ -1245,6 +1306,7 @@ def hkb_health(
             "current": __version__,
             "update_available": getattr(app_ctx, "update_available", "") or "",
         }
+        result["protocol"] = app_ctx.protocol_gate.state
         result["stats"] = _collect_system_stats(store, ctx)
         _enrich_fix_hints(result["checks"])
         result["duration_ms"] = round((time.time() - start) * 1000)
@@ -1506,6 +1568,7 @@ def _do_sync_status(store, ctx):
         except Exception as e:
             result["engine_error"] = str(e)
     app_ctx = ctx.request_context.lifespan_context
+    result["protocol"] = app_ctx.protocol_gate.state
     worker = app_ctx.sync_worker
     result["worker_running"] = bool(worker and worker.is_running)
     result["worker_is_leader"] = bool(worker and getattr(worker, "is_leader", False))
@@ -1617,7 +1680,10 @@ def hkb_context(
         max_tokens = max(100, min(max_tokens, 50000))
         if depth not in ("deep", "shallow"):
             depth = "deep"
-        result = store.build_context(topic=topic, max_tokens=max_tokens, domain=domain, depth=depth)
+        state = ctx.request_context.lifespan_context.protocol_gate.state
+        metadata = {"_protocol": state} if state.get("blocked") else None
+        result = store.build_context(topic=topic, max_tokens=max_tokens, domain=domain,
+                                     depth=depth, response_metadata=metadata)
         # Preserve the complete response budget measured by build_context;
         # adding anchor flags or changing scores after packing changes its size.
         return json.dumps(result, indent=2)

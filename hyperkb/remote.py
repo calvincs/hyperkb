@@ -1,6 +1,7 @@
 """S3-compatible sync storage with immutable snapshots and conditional leases.
 
 Version 2 layout below the configured prefix:
+    _sync/protocol.json       - exact client protocol and ready/upgrading fence
     _sync/manifest.json       - versioned live inventory and deletion tombstones
     _sync/objects/<sha256>    - immutable markdown bytes referenced by the manifest
     _sync/lock.json           - unique operation lease, TTL and diagnostic machine ID
@@ -18,13 +19,17 @@ import time
 import uuid
 import threading
 from typing import Optional
+from contextlib import contextmanager
+
+from .protocol import SYNC_PROTOCOL_VERSION, ProtocolError, require_matching_protocol
 
 logger = logging.getLogger(__name__)
 
 BOTO3_AVAILABLE = False
 try:
     import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
+    from botocore.exceptions import (ClientError, NoCredentialsError, EndpointConnectionError,
+                                     ConnectionClosedError, ConnectTimeoutError, ReadTimeoutError)
     from botocore.config import Config
     BOTO3_AVAILABLE = True
 except ImportError:
@@ -75,6 +80,12 @@ class S3Remote:
             kwargs["aws_secret_access_key"] = secret_key
 
         self._client = boto3.client("s3", **kwargs)
+        # Knowledge operations probe compatibility before proceeding locally;
+        # they must not inherit bulk-transfer retry and read-timeout delays.
+        probe_kwargs = dict(kwargs)
+        probe_kwargs["config"] = Config(connect_timeout=2, read_timeout=2,
+                                        retries={"total_max_attempts": 1})
+        self._protocol_client = boto3.client("s3", **probe_kwargs)
 
     def _key(self, path: str) -> str:
         """Build full S3 key from relative path."""
@@ -136,6 +147,173 @@ class S3Remote:
                     files.append(name)
         return files
 
+    # --- Stable protocol envelope ---
+
+    @contextmanager
+    def _protocol_errors(self):
+        """Distinguish transport outages from untrusted or inaccessible metadata."""
+        from .protocol import ProtocolUnavailable
+        try:
+            yield
+        except ProtocolError:
+            raise
+        except (EndpointConnectionError, ConnectionClosedError, ConnectTimeoutError, ReadTimeoutError) as error:
+            raise ProtocolUnavailable() from error
+        except ClientError as error:
+            status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+            if 500 <= status < 600:
+                raise ProtocolUnavailable() from error
+            raise ProtocolError("protocol_unverified", "S3 protocol verification failed. Check bucket permissions and configuration.") from error
+        except Exception as error:
+            raise ProtocolError("protocol_unverified", "S3 protocol metadata could not be verified. Check configuration or restore valid metadata.") from error
+
+    def _read_json(self, name, client=None):
+        client = self._client if client is None else client
+        try:
+            response = client.get_object(Bucket=self.bucket, Key=self._sync_key(name))
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                return None, None
+            raise
+        value = json.loads(response["Body"].read().decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ProtocolError("protocol_unverified", "S3 protocol metadata must be a JSON object.")
+        return value, response["ETag"]
+
+    def _require_empty_remote(self, client=None):
+        client = self._client if client is None else client
+        for prefix in (self._key("storage/"), self._sync_key("objects/")):
+            response = client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, MaxKeys=1)
+            if response.get("KeyCount", 0):
+                raise ProtocolError("protocol_unverified", "The S3 manifest is missing while stored objects exist. Restore the manifest or explicitly rebuild legacy inventory before syncing.")
+
+    @staticmethod
+    def _ready_marker(marker):
+        version = require_matching_protocol(marker.get("protocol_version"))
+        if marker.get("state", "ready") != "ready":
+            raise ProtocolError("protocol_unverified", "The S3 protocol migration is incomplete. Local recording remains available; retry hkb sync upgrade-protocol before syncing.", version)
+        return version
+
+    def check_protocol(self) -> dict:
+        """Read only: check the small stable marker, or a legacy manifest header.
+
+        Ready markers are a one-GET path for knowledge requests. Sync separately
+        validates the manifest header under its lease before using its inventory.
+        """
+        with self._protocol_errors():
+            marker, _ = self._read_json("protocol.json", self._protocol_client)
+            if marker is not None:
+                return {"protocol_version": self._ready_marker(marker), "marker_present": True}
+            manifest, _ = self._read_json("manifest.json", self._protocol_client)
+            if manifest is not None:
+                version = require_matching_protocol(manifest.get("version", 1))
+            else:
+                self._require_empty_remote(self._protocol_client)
+                version = SYNC_PROTOCOL_VERSION
+            return {"protocol_version": version, "marker_present": False}
+
+    def _write_protocol(self, state, expected_etag):
+        conditions = {"IfMatch": expected_etag} if expected_etag else {"IfNoneMatch": "*"}
+        response = self._client.put_object(
+            Bucket=self.bucket, Key=self._sync_key("protocol.json"),
+            Body=json.dumps({"protocol_version": SYNC_PROTOCOL_VERSION, "state": state,
+                             "revision": uuid.uuid4().hex}).encode(),
+            ContentType="application/json", **conditions)
+        return response["ETag"]
+
+    def _require_lease(self):
+        if not self.renew_lock():
+            raise ProtocolError("protocol_unverified", "The S3 sync lease is unavailable or expired; retry the operation.")
+
+    def ensure_protocol(self) -> dict:
+        """Under our lease, validate inventory and conditionally seed a ready marker."""
+        with self._protocol_errors():
+            self._require_lease()
+            result = self.check_protocol()
+            manifest, _ = self._read_json("manifest.json")
+            if manifest is not None:
+                require_matching_protocol(manifest.get("version", 1))
+            else:
+                self._require_empty_remote()
+            if not result["marker_present"]:
+                self._require_lease()
+                try:
+                    self._write_protocol("ready", None)
+                except ClientError as error:
+                    if not self._condition_failed(error):
+                        raise
+                    # A concurrent creator wins; its envelope must match too.
+                result = self.check_protocol()
+                manifest, _ = self._read_json("manifest.json")
+                if manifest is not None:
+                    require_matching_protocol(manifest.get("version", 1))
+                else:
+                    self._require_empty_remote()
+            return result
+
+    def upgrade_protocol(self, dry_run: bool = False) -> dict:
+        """Explicit, resumable v1 -> v2 migration; no object inventory is discarded.
+
+        Fence guarded old and new clients with an upgrading marker, CAS the
+        manifest, then CAS the marker to ready. A retry can finish either stage.
+        """
+        with self._protocol_errors():
+            if not dry_run:
+                # Reject future or malformed protocols before even writing a
+                # lease. Re-read the complete snapshot after ownership below.
+                self.upgrade_protocol(dry_run=True)
+            if not dry_run and not self.acquire_lock():
+                raise ProtocolError("protocol_unverified", "Another operation holds the S3 sync lease. Retry the protocol upgrade shortly.")
+            try:
+                marker, marker_etag = self._read_json("protocol.json")
+                marker_version = marker.get("protocol_version") if marker is not None else None
+                if marker is not None and (type(marker_version) is not int or marker_version not in (1, SYNC_PROTOCOL_VERSION)):
+                    require_matching_protocol(marker_version)
+                # A future marker is rejected before even reading its manifest.
+                manifest, manifest_etag = self._read_json("manifest.json")
+                manifest_version = manifest.get("version", 1) if manifest is not None else None
+                if manifest is not None and (type(manifest_version) is not int or manifest_version not in (1, SYNC_PROTOCOL_VERSION)):
+                    require_matching_protocol(manifest_version)
+                if marker is not None and marker.get("state", "ready") not in ("ready", "upgrading"):
+                    raise ProtocolError("protocol_unverified", "The S3 protocol marker has an unknown migration state.")
+                if manifest is None:
+                    self._require_empty_remote()
+                    manifest = {"files": {}, "tombstones": {}}
+                if not isinstance(manifest.get("files"), dict) or not isinstance(manifest.get("tombstones", {}), dict):
+                    raise ProtocolError("protocol_unverified", "The S3 inventory is malformed; restore it before migrating.")
+                transformation = {
+                    "from_protocol_version": manifest_version,
+                    "to_protocol_version": SYNC_PROTOCOL_VERSION,
+                    "markdown_changed": False,
+                    "files_preserved": len(manifest["files"]),
+                    "tombstones_preserved": len(manifest.get("tombstones", {})),
+                    "blob_references_preserved": sum(
+                        bool(entry.get("blob")) for inventory in (manifest["files"], manifest.get("tombstones", {}))
+                        for entry in inventory.values() if isinstance(entry, dict)),
+                }
+                if dry_run:
+                    return {"status": "dry_run", "protocol_version": SYNC_PROTOCOL_VERSION,
+                            "upgraded": False, "transformation": transformation}
+                if marker_version == SYNC_PROTOCOL_VERSION and marker.get("state", "ready") == "ready" and manifest_version == SYNC_PROTOCOL_VERSION:
+                    return {"status": "ok", "protocol_version": SYNC_PROTOCOL_VERSION, "upgraded": False,
+                            "transformation": transformation}
+
+                self._require_lease()
+                marker_etag = self._write_protocol("upgrading", marker_etag)
+                if manifest_version != SYNC_PROTOCOL_VERSION:
+                    upgraded = dict(manifest, version=SYNC_PROTOCOL_VERSION)
+                    self._require_lease()
+                    self.put_manifest(upgraded, expected_etag=manifest_etag)
+                self._require_lease()
+                self._write_protocol("ready", marker_etag)
+                self.check_protocol()
+                return {"status": "ok", "protocol_version": SYNC_PROTOCOL_VERSION,
+                        "upgraded": True, "from_protocol_version": manifest_version,
+                        "transformation": transformation}
+            finally:
+                if not dry_run:
+                    self.release_lock()
+
     # --- Manifest operations ---
 
     def get_manifest(self) -> dict:
@@ -144,7 +322,16 @@ class S3Remote:
         Empty means an unused remote; existing objects without inventory require
         an explicit rebuild (legacy) or a restored manifest (version 2).
         """
-        return self._read_manifest()
+        with self._protocol_errors():
+            self.check_protocol()
+            manifest, etag = self._read_json("manifest.json")
+            if manifest is not None:
+                require_matching_protocol(manifest.get("version", 1))
+            else:
+                self._require_empty_remote()
+                manifest = {"files": {}}
+            self.manifest_etag = etag
+            return manifest
 
     def _read_manifest(self, allow_legacy_rebuild=False):
         key = self._sync_key("manifest.json")

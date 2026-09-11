@@ -25,6 +25,28 @@ from .db import KBDatabase
 logger = logging.getLogger("hyperkb.cli")
 
 
+def _check_local_sync_protocol(config):
+    """Warn persistently about blocked remote sync while allowing local work."""
+    from .protocol import ProtocolError, ProtocolGate
+    try:
+        state = ProtocolGate(config).check(allow_local=True)
+    except ProtocolError as exc:
+        state = exc.as_dict()
+    if state.get("blocked") or state.get("status") == "offline":
+        click.echo(json.dumps(state, indent=2), err=True)
+        click.echo("Local work will continue and pending changes are preserved. Remote sync remains blocked until compatibility is restored.", err=True)
+    return state
+
+
+def _configured_remote(config):
+    from .remote import S3Remote
+    return S3Remote(
+        bucket=config.sync_bucket, prefix=config.sync_prefix,
+        region=config.sync_region, endpoint_url=config.sync_endpoint_url,
+        access_key=config.sync_access_key, secret_key=config.sync_secret_key,
+    )
+
+
 @click.group()
 @click.version_option(version=__version__)
 def cli():
@@ -81,11 +103,18 @@ def init(path):
     else:
         root = Path(path).resolve()
 
-    config = KBConfig(root=str(root))
+    try:
+        config = KBConfig.load(str(root))
+    except FileNotFoundError:
+        config = KBConfig(root=str(root))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _check_local_sync_protocol(config)
     store = KnowledgeStore(config)
-    result = store.init()
-    store.close()
-    click.echo(result)
+    try:
+        click.echo(store.init())
+    finally:
+        store.close()
 
 
 @cli.command()
@@ -236,7 +265,9 @@ def reindex(path):
     """Rebuild the index from markdown, preserving configuration and corrupt DBs."""
     store = None
     try:
-        store = KnowledgeStore(KBConfig.load(path))
+        config = KBConfig.load(path)
+        _check_local_sync_protocol(config)
+        store = KnowledgeStore(config)
         recovered = store.recover_index()
         click.echo(recovered or store.reindex())
     except (OSError, ValueError, sqlite3.Error) as e:
@@ -271,6 +302,13 @@ def _git_run(repo: Path, *args, timeout: int = 30) -> subprocess.CompletedProces
         ["git", *args],
         cwd=repo, capture_output=True, text=True, timeout=timeout,
     )
+
+
+def _update_revision(repo: Path, ref: str) -> str:
+    result = _git_run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise click.ClickException(f"Could not resolve {ref}: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 def _get_local_tag(repo: Path) -> str:
@@ -313,7 +351,7 @@ def update():
 
 @update.command("check")
 def update_check():
-    """Fetch tags from origin and compare local vs remote versions."""
+    """Fetch origin and compare source commits as well as release tags."""
     repo = _find_repo_dir()
     if not repo:
         click.echo("Error: Could not find hyperkb git repository.", err=True)
@@ -341,19 +379,21 @@ def update_check():
     else:
         click.echo(f"Remote tag: {remote_tag}")
 
-    installed_version = f"v{__version__}" if not __version__.startswith("v") else __version__
-    if remote_tag and installed_version != remote_tag:
-        click.echo(f"\nUpdate available: {installed_version} → {remote_tag}")
-        click.echo("Run 'hkb update apply' to upgrade.")
-    elif remote_tag:
-        click.echo("\nUp to date.")
+    local_head = _update_revision(repo, "HEAD")
+    remote_head = _update_revision(repo, "origin/main")
+    if local_head == remote_head:
+        click.echo(f"\nSource is up to date ({local_head[:8]}).")
+        click.echo("Run 'hkb update apply' to refresh installed dependencies if needed.")
+    elif _git_run(repo, "merge-base", "--is-ancestor", local_head, remote_head).returncode == 0:
+        click.echo(f"\nSource update available: {local_head[:8]} → {remote_head[:8]}")
+        click.echo("Run 'hkb update apply' to upgrade, even if the release tag is unchanged.")
     else:
-        click.echo("\nCould not determine update status.")
+        click.echo("\nLocal source is ahead of or diverged from origin/main; reconcile branches before updating.")
 
 
 @update.command("apply")
 def update_apply():
-    """Pull latest changes, reinstall if needed, restart MCP server."""
+    """Fast-forward source, reinstall its dependencies, and show restart instructions."""
     repo = _find_repo_dir()
     if not repo:
         click.echo("Error: Could not find hyperkb git repository.", err=True)
@@ -368,50 +408,45 @@ def update_apply():
         click.echo(f"Error: git fetch failed: {r.stderr.strip()}", err=True)
         sys.exit(1)
 
-    # Step 2: Compare installed version against latest remote tag
-    local_tag = _get_local_tag(repo)
-    remote_tag = _get_remote_tag(repo)
     installed_version = f"v{__version__}" if not __version__.startswith("v") else __version__
-    if remote_tag and installed_version == remote_tag:
-        click.echo(f"Already up to date ({installed_version}).")
-        return
-
-    # Step 3: Guard against dirty tree
     r = _git_run(repo, "status", "--porcelain")
-    if r.stdout.strip():
-        click.echo("Error: Working tree has uncommitted changes. Commit or stash first.", err=True)
-        sys.exit(1)
-
-    # Step 4: Capture old HEAD and pull
-    old_head = _git_run(repo, "rev-parse", "HEAD").stdout.strip()
-    click.echo("Pulling latest changes...")
-    r = _git_run(repo, "pull", "--ff-only", "origin", "main")
     if r.returncode != 0:
-        click.echo(f"Error: git pull failed: {r.stderr.strip()}", err=True)
-        click.echo("Try resolving manually, then run 'hkb update apply' again.")
-        sys.exit(1)
-    new_head = _git_run(repo, "rev-parse", "HEAD").stdout.strip()
+        raise click.ClickException(f"Could not check working tree: {r.stderr.strip()}")
+    if r.stdout.strip():
+        raise click.ClickException("Working tree has uncommitted changes. Commit or stash first.")
 
-    if old_head == new_head:
-        click.echo("No new commits.")
-        return
+    old_head = _update_revision(repo, "HEAD")
+    target_head = _update_revision(repo, "origin/main")
+    if old_head != target_head:
+        ancestor = _git_run(repo, "merge-base", "--is-ancestor", old_head, target_head)
+        if ancestor.returncode != 0:
+            raise click.ClickException(
+                "Local source is ahead of or diverged from origin/main; refusing to replace it. "
+                "Reconcile the branches manually, then run hkb update apply again."
+            )
+        click.echo("Fast-forwarding to the fetched origin/main revision...")
+        r = _git_run(repo, "merge", "--ff-only", target_head)
+        if r.returncode != 0:
+            raise click.ClickException(f"Fast-forward failed: {r.stderr.strip()}")
+        click.echo(f"Updated source: {old_head[:8]} → {target_head[:8]}")
+    else:
+        click.echo("Source already matches origin/main; refreshing the installed package.")
+    new_head = _update_revision(repo, "HEAD")
 
-    click.echo(f"Updated: {old_head[:8]} → {new_head[:8]}")
-
-    # Step 5: Always reinstall so setuptools-scm picks up the new tag
-    click.echo("Reinstalling (setuptools-scm version sync)...")
-    pip_exe = Path(sys.prefix) / "bin" / "pip"
-    if not pip_exe.exists():
-        pip_exe = Path(sys.executable).parent / "pip"
+    # Reinstall even at the same commit: dependencies/installed metadata may lag
+    # the checked-out source, including commits published under an unchanged tag.
+    click.echo("Reinstalling current source and dependencies...")
     try:
         subprocess.run(
-            [str(pip_exe), "install", "-e", ".[all]"],
+            [sys.executable, "-m", "pip", "install", "-e", ".[all]"],
             cwd=repo, check=True, timeout=120,
         )
         click.echo("Reinstall complete.")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        click.echo(f"Warning: pip install failed: {e}", err=True)
-        click.echo("You may need to run: pip install -e '.[all]' manually.")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        raise click.ClickException(
+            "Source update completed, but package installation failed. "
+            "Resolve the installation error and run hkb update apply again."
+        ) from exc
 
     # Step 6: Copy skill files if present
     skill_mappings = [
@@ -430,7 +465,7 @@ def update_apply():
 
     # Step 8: Log the update
     new_tag = _get_local_tag(repo) or new_head[:8]
-    msg = f"Updated {installed_version} → {new_tag}"
+    msg = f"Installed {new_tag} at {new_head[:8]} (previous package {installed_version})"
     _log_update(msg)
     click.echo(f"\nDone. {msg}")
 
@@ -454,7 +489,11 @@ def sync():
     \b
     COMMANDS:
       hkb sync setup    Interactive S3 configuration wizard
-      hkb sync status   Show sync state (last sync, pending changes)
+      hkb sync status   Show protocol compatibility and local sync state
+      hkb sync upgrade-protocol --dry-run   Preview the protocol migration
+      hkb sync upgrade-protocol   Migrate after upgrading or stopping legacy clients
+
+    Local work continues when protocols differ; only remote sync is blocked.
     """
     pass
 
@@ -544,7 +583,8 @@ def setup(path):
 
     click.echo(f"\nSync configured: s3://{bucket}/{prefix}")
 
-    # Initialize git repo in storage dir
+    # Local Git history preserves pending work even while remote sync is blocked.
+    _check_local_sync_protocol(cfg)
     try:
         from .sync import GitRepo
         git = GitRepo(cfg.storage_dir)
@@ -553,7 +593,7 @@ def setup(path):
     except Exception as e:
         click.echo(f"Warning: git init failed: {e}", err=True)
 
-    click.echo("\nSync is now enabled. The MCP server will start syncing on next launch.")
+    click.echo("\nSync is configured. Local work is preserved; remote sync requires matching protocol versions.")
 
 
 @sync.command("status")
@@ -584,6 +624,14 @@ def sync_status(path):
         click.echo(f"Endpoint: {cfg.sync_endpoint_url}")
     click.echo(f"Interval: {cfg.sync_interval}s")
 
+    from .protocol import ProtocolError, ProtocolGate
+    protocol_error = None
+    try:
+        click.echo(json.dumps(ProtocolGate(cfg).check(), indent=2))
+    except ProtocolError as exc:
+        protocol_error = exc
+        click.echo(json.dumps(exc.as_dict(), indent=2), err=True)
+
     # Check git status
     try:
         from .sync import GitRepo
@@ -605,6 +653,39 @@ def sync_status(path):
             click.echo("Git: not initialized (run 'hkb sync setup')")
     except Exception as e:
         click.echo(f"Git status error: {e}", err=True)
+
+    if protocol_error is not None:
+        raise click.exceptions.Exit(1)
+
+
+@sync.command("upgrade-protocol")
+@click.option("--dry-run", is_flag=True, help="Preview the migration without changing S3 objects.")
+@click.option("--path", default=None, help="KB root directory (default: ~/.hkb/).")
+def upgrade_protocol(path, dry_run):
+    """Migrate an older S3 protocol after upgrading and stopping legacy clients.
+
+    Use --dry-run to review the transformation first. Applying it changes the
+    remote compatibility marker under its lease while preserving markdown.
+    Upgrade all clients first; legacy clients without protocol checks must stay
+    stopped during and after migration. Local pending changes remain on disk.
+    After migration, review deltas with hkb_sync(dry_run=True) before syncing.
+    """
+    from .protocol import ProtocolError
+    try:
+        cfg = KBConfig.load(path)
+        if not cfg.sync_bucket:
+            raise click.ClickException("Configure an S3 sync bucket before upgrading its protocol.")
+        if not dry_run:
+            click.echo("Migrating the S3 protocol. All legacy clients must already be upgraded or stopped.")
+        result = _configured_remote(cfg).upgrade_protocol(dry_run=dry_run)
+        click.echo(json.dumps(result, indent=2))
+        if not dry_run:
+            click.echo("Local pending changes are preserved. Review deltas with hkb_sync(dry_run=True) before syncing.")
+    except ProtocolError as exc:
+        click.echo(json.dumps(exc.as_dict(), indent=2), err=True)
+        raise click.exceptions.Exit(1) from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

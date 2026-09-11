@@ -991,6 +991,7 @@ class KnowledgeStore:
         max_tokens: int = 4000,
         domain: str = "",
         depth: str = "deep",
+        response_metadata: Optional[dict] = None,
     ) -> dict:
         """Search for a topic and pack the most relevant entries into a token budget.
 
@@ -999,17 +1000,15 @@ class KnowledgeStore:
             max_tokens: Token budget (default 4000).
             domain: Optional domain filter.
             depth: "deep" (full content) or "shallow" (first 200 chars per entry).
+            response_metadata: Internal protocol diagnostic envelope, limited to
+                an optional _protocol mapping. Included in the response budget.
 
         Returns:
-            Dict with topic, tokens_used, tokens_budget, depth, entries, truncated, file_summaries.
+            Dict with topic, tokens_used, tokens_budget, depth, entries, truncated,
+            file_summaries and optional protocol diagnostics. If mandatory diagnostics
+            exceed the budget, returns no entries, budget_exceeded=True, accurate
+            tokens_used and diagnostic_overhead_tokens instead of hiding the warning.
         """
-        results = self.search(topic, limit=30, domain=domain or None)
-
-        # Re-rank by score * type priority
-        for r in results:
-            r.score *= self._type_priority(r.entry_type, r.status)
-        results.sort(key=lambda r: r.score, reverse=True)
-
         if depth not in {"deep", "shallow"}:
             raise ValueError("depth must be deep or shallow")
         response = {
@@ -1024,8 +1023,34 @@ class KnowledgeStore:
                 response["tokens_used"] = self._estimate_tokens(json.dumps(response, indent=2))
             return response["tokens_used"]
 
+        base_tokens = measure()
+        if response_metadata:
+            if (not isinstance(response_metadata, dict)
+                    or set(response_metadata) != {"_protocol"}
+                    or not isinstance(response_metadata["_protocol"], dict)):
+                raise ValueError("response_metadata must contain only an internal _protocol mapping")
+            # Snapshot the JSON envelope so later gate state updates cannot alter
+            # an already packed response or invalidate its token estimate.
+            response.update(json.loads(json.dumps(response_metadata)))
         if measure() > max_tokens:
-            raise ValueError("Token budget is too small for the response metadata")
+            if not response_metadata:
+                raise ValueError("Token budget is too small for the response metadata")
+            response["budget_exceeded"] = True
+            response["diagnostic_overhead_tokens"] = 0
+            # Include the overrun diagnostic's own structure and digits in its
+            # overhead estimate as well as the complete response estimate.
+            for _ in range(4):
+                response["diagnostic_overhead_tokens"] = measure() - base_tokens
+            measure()
+            return response
+
+        results = self.search(topic, limit=30, domain=domain or None)
+
+        # Re-rank by score * type priority
+        for r in results:
+            r.score *= self._type_priority(r.entry_type, r.status)
+        results.sort(key=lambda r: r.score, reverse=True)
+
         files_seen = set()
         for r in results:
             entry = {

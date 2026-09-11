@@ -31,6 +31,10 @@ Reindex reads Markdown and rebuilds entries, full-text search, metadata, and lin
 
 Use the offline command when MCP cannot start. If the Markdown itself is incomplete or corrupt, index rebuilding cannot invent the missing text: restore it from a backup or known history first.
 
+## Recover from a protocol mismatch
+
+Continue recording locally. `hkb sync status` and `hkb_sync(action="status")` report the remote protocol and upgrade instructions. A mismatch stops remote transfers and preserves pending edits; disconnecting does not erase that warning. Upgrade/restart the client, preview and apply a supported store migration if required, then preview sync before reconciling. Keep `.hkb/sync` with your Markdown so the previous common baseline survives. See [the migration and reconciliation workflow](SYNC.md#reconcile-changes-recorded-while-sync-was-paused).
+
 ## Back up safely
 
 For a simple consistent backup, close the clients using this KB and wait for their processes to exit before copying the `.hkb` directory. Retain `storage`, configuration, and sync state. Treat saved configuration as potentially sensitive. Store the backup outside the live storage directory.

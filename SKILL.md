@@ -177,4 +177,4 @@ Read the returned epoch instead of predicting a timestamp. Inspect recent entrie
 
 Context budgets estimate the complete JSON response. They are not a model-specific tokenizer guarantee. Session anchors influence search and suggestions; packed context is returned without post-pack score mutations.
 
-Sync is optional. This release publishes manifest version 2; upgrade all clients using the same remote bucket/prefix before enabling it. See [sync](docs/SYNC.md) and [maintenance](docs/OPERATIONS.md).
+Sync is optional. Check `_protocol` warnings: keep recording and retrieving locally when S3 is offline or incompatible, tell the user remote sync is paused, and follow the upgrade instructions. Do not disable sync or remove saved protocol state to hide a mismatch. After upgrade/migration, preview `hkb_sync(action="both", dry_run=True)` to review pending changes, then reconcile and inspect conflicts. Clients predating protocol checks need one coordinated upgrade before protocol 1 → 2 migration. See [sync](docs/SYNC.md) and [maintenance](docs/OPERATIONS.md).

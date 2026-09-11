@@ -369,6 +369,7 @@ def mock_remote():
     """A mock S3Remote."""
     remote = MagicMock()
     remote.get_manifest.return_value = {"files": {}}
+    remote.check_protocol.return_value = {"protocol_version": 2, "marker_present": True}
     remote.acquire_lock.return_value = True
     remote.release_lock.return_value = None
     return remote
