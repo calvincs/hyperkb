@@ -10,6 +10,8 @@
 <main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Changelog</h1><p class="doc-description">Current changes and historical releases.</p><div class="doc-source-links"><a href="../CHANGELOG.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/CHANGELOG.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="changelog"></span>
 <h2 id="unreleased">Unreleased</h2>
 <ul>
+<li>S3 protocol checks pause incompatible remote sync while preserving local recording, with persistent warnings across reconnects and explicit, previewable protocol 1 → 2 migration. Pending local edits reconcile after upgrade.</li>
+<li><code>hkb update apply</code> follows newer commits even when release tags are unchanged and can retry installation after a partial update.</li>
 <li>Multiple local MCP clients now share coordinated storage without terminating one another; session anchors and provenance remain independent.</li>
 <li>Atomic entry/configuration updates, recoverable archives, consistent reindex transactions, and offline <code>hkb doctor</code> / <code>hkb reindex</code> improve recovery.</li>
 <li>Sync uses staged three-way merges, independent direction checkpoints, elected workers, conditional leases, and version 2 manifests with immutable blobs and deletion records. <strong>Upgrade all clients sharing a remote destination before publication.</strong></li>

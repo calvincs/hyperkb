@@ -100,7 +100,7 @@ hkb_context(topic=&quot;postgres connection limits&quot;, max_tokens=2000)
 </table>
 <p>The website publishes readable versions of these canonical Markdown guides, including source links and machine-readable entry points. <a href="https://github.com/calvincs/hyperkb/blob/main/docs/WEBSITE.md">Website maintenance</a> explains the build and validation workflow.</p>
 <h2 id="upgrading-an-existing-installation">Upgrading an existing installation</h2>
-<p>Restart every local MCP client after upgrading. The reliability update uses <strong>sync manifest version 2</strong> with immutable content blobs and deletion records. Upgrade all clients sharing a bucket/prefix before an upgraded client publishes to it; old clients cannot safely read this format. Back up the local Markdown and remote destination first. See <a href="sync.html#upgrade-existing-installations-first">the migration guide</a>.</p>
+<p>Restart every local MCP client after upgrading. <strong>Local recording continues during outages and protocol mismatches; remote sync pauses with an upgrade warning.</strong> Clients check the S3 protocol before syncing and preserve pending edits for reconciliation after upgrade. Existing protocol 1 stores have an explicit, previewable migration to protocol 2. Clients predating these checks need one coordinated upgrade first. See <a href="sync.html#upgrade-existing-installations-first">the migration guide</a>.</p>
 <h2 id="development">Development</h2>
 <pre><code class="language-bash">.venv/bin/pip install -e &quot;.[all,dev]&quot;
 PYTHONPATH=. .venv/bin/pytest tests/ -q

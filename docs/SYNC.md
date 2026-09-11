@@ -4,9 +4,42 @@ Sync is optional. Each machine keeps a local knowledge base; an S3-compatible bu
 
 ## Upgrade existing installations first
 
-The reliability update introduces **sync manifest version 2** with immutable content objects and explicit deletion records. It can read legacy manifests, but older HyperKB clients cannot safely interpret the new blob references. Upgrade and restart **every client using a bucket/prefix before an upgraded client publishes to it**. Do not mix old and new clients against the same destination.
+The S3 store advertises its wire protocol in `_sync/protocol.json`. This client uses **protocol 2**, with immutable content objects and deletion records. Remote synchronization requires an exact match. A mismatched client never uploads, downloads, or guesses how to interpret an unknown format.
 
-Back up each machine's Markdown and the remote bucket before a coordinated upgrade. For a staged trial, configure a separate bucket prefix. Unknown manifest versions are rejected rather than guessed.
+**Local recording and retrieval continue**, including during an outage or a protocol mismatch. Tool responses carry an `_protocol` warning while remote sync is paused. A detected mismatch is saved per bucket/prefix and survives disconnects, client restarts, and credential changes. It clears after a successful matching check; an outage cannot clear it. Each MCP request checks the small protocol marker, independently of the background sync leader.
+
+Clients released before this check cannot enforce it. Upgrade and restart those clients once before migrating a shared store. For later transitions, guarded clients pause remote synchronization themselves and report the upgrade needed. An already admitted operation may finish; synchronization rechecks the protocol before applying or publishing changes.
+
+### Migrate an existing store
+
+Back up local Markdown, `.hkb/sync` baselines, and the remote inventory. Upgrade each installation and restart its MCP clients:
+
+```bash
+hkb update apply
+hkb sync upgrade-protocol --dry-run
+hkb sync upgrade-protocol
+```
+
+The migration command also works while sync is disabled. Its dry run reports the source/target protocol and transformation without changing the bucket. A legacy protocol 1 manifest requires this explicit migration; a compatible protocol 2 store without a marker receives one during normal sync. New empty destinations initialize at the current protocol.
+
+The supported **1 → 2** transformation preserves every inventory entry, tombstone, and existing content reference. Markdown bytes do not need transformation. Migration marks the store as upgrading, conditionally updates the manifest under a lease, and marks it ready only on completion. Interrupted migrations remain blocked remotely and can be retried with the same command. A future unknown protocol requires newer software with a supported migration; this command never downgrades it.
+
+### Reconcile changes recorded while sync was paused
+
+Keep local Markdown, Git history, and `.hkb/sync` together. Pending edits remain separate from the last successful synchronization baseline. After upgrading and verifying compatibility:
+
+```python
+hkb_sync(action="status")
+hkb_sync(action="both", dry_run=True)
+hkb_sync(action="both")
+hkb_sync(action="conflicts")
+```
+
+The preview reports files that differ locally and remotely. Applying `both` merges against the stored baseline and preserves competing entry content for review. Upgrading the remote format does not acknowledge or discard local edits. For this transition, those edits can be reconciled directly; a future content-format change must supply its own explicit transformation before synchronization resumes.
+
+## Evolving the protocol
+
+Protocol numbers describe wire compatibility, independently of package release numbers. Prefer compatible additions under the existing protocol. A breaking change requires a new version and an explicit migration that preserves pending local deltas and the previous baseline, with a preview and a resumable apply step. This release implements the known 1 → 2 transition; it does not pretend to transform unknown future formats.
 
 ## Set up a destination
 
@@ -45,7 +78,7 @@ A stored baseline distinguishes local additions from remote deletions. A machine
 
 ## What happens during sync
 
-1. Obtain a conditional remote lease with a unique owner token.
+1. Verify the protocol, then obtain a conditional remote lease with a unique owner token.
 2. Read the manifest under that lease and compare it with local and previously synchronized state.
 3. Download and verify remote content in staging, then merge files with their common ancestor.
 4. Publish local mutations through the same storage coordination used by MCP writes.

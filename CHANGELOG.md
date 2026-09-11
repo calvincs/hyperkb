@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- S3 protocol checks pause incompatible remote sync while preserving local recording, with persistent warnings across reconnects and explicit, previewable protocol 1 → 2 migration. Pending local edits reconcile after upgrade.
+- `hkb update apply` follows newer commits even when release tags are unchanged and can retry installation after a partial update.
 - Multiple local MCP clients now share coordinated storage without terminating one another; session anchors and provenance remain independent.
 - Atomic entry/configuration updates, recoverable archives, consistent reindex transactions, and offline `hkb doctor` / `hkb reindex` improve recovery.
 - Sync uses staged three-way merges, independent direction checkpoints, elected workers, conditional leases, and version 2 manifests with immutable blobs and deletion records. **Upgrade all clients sharing a remote destination before publication.**

@@ -34,6 +34,8 @@ To share a nondefault KB root, include:
 
 Restart every client when upgrading the executable. Avoid running an old server alongside an upgraded server; old code does not participate in the new coordination protocol.
 
+For sync-enabled clients, each tool call checks the S3 protocol. Local knowledge operations continue during outages or mismatches and include an `_protocol` warning. Search results, normally a list, use `{ "result": [...], "_protocol": {...} }` while a warning is present. Packed context counts diagnostic metadata in its token estimate; if the mandatory notice alone exceeds the budget, it returns no entries and explicitly reports `budget_exceeded`. Remote sync calls fail with an actionable protocol error until compatibility is verified. Every client performs its own check, including background-worker followers. See [sync and migration](SYNC.md#upgrade-existing-installations-first).
+
 ## Tool map
 
 | Tool | Use it for | Main modes or actions |

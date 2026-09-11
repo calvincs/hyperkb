@@ -29,6 +29,7 @@
 <pre><code class="language-json">&quot;args&quot;: [&quot;--path&quot;, &quot;/absolute/path/to/knowledge-root&quot;]
 </code></pre>
 <p>Restart every client when upgrading the executable. Avoid running an old server alongside an upgraded server; old code does not participate in the new coordination protocol.</p>
+<p>For sync-enabled clients, each tool call checks the S3 protocol. Local knowledge operations continue during outages or mismatches and include an <code>_protocol</code> warning. Search results, normally a list, use <code>{ "result": [...], "_protocol": {...} }</code> while a warning is present. Packed context counts diagnostic metadata in its token estimate; if the mandatory notice alone exceeds the budget, it returns no entries and explicitly reports <code>budget_exceeded</code>. Remote sync calls fail with an actionable protocol error until compatibility is verified. Every client performs its own check, including background-worker followers. See <a href="sync.html#upgrade-existing-installations-first">sync and migration</a>.</p>
 <h2 id="tool-map">Tool map</h2>
 <table>
 <thead>
