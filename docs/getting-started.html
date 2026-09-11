@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your first knowledge base · HyperKB</title><meta name="description" content="Install, connect a client, and save your first entry.">
+<link rel="canonical" href="https://hyperkb.com/docs/getting-started.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html" aria-current="page">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Your first knowledge base</h1><p class="doc-description">Install, connect a client, and save your first entry.</p><div class="doc-source-links"><a href="GETTING_STARTED.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/GETTING_STARTED.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="your-first-knowledge-base"></span>
+<p>Install HyperKB, connect one MCP client, and save a decision you want to remember in the next session.</p>
+<h2 id="requirements">Requirements</h2>
+<ul>
+<li>Python 3.10 or newer.</li>
+<li><a href="https://github.com/BurntSushi/ripgrep#installation">ripgrep</a> (<code>rg</code>) on your PATH for literal search. BM25 remains available when ripgrep is absent.</li>
+<li>An MCP client that can launch a local stdio server.</li>
+<li>Git and the optional sync dependencies if you want synchronization between machines.</li>
+</ul>
+<p>The shell commands below use Linux/macOS paths. Local search does not require a model download, an embedding service, or a model API key. Install ripgrep using your system package manager, for example <code>brew install ripgrep</code> on macOS or <code>sudo apt install ripgrep</code> on Debian/Ubuntu.</p>
+<h2 id="install-from-source">Install from source</h2>
+<pre><code class="language-bash">git clone https://github.com/calvincs/hyperkb
+cd hyperkb
+python3 -m venv .venv
+.venv/bin/pip install -e &quot;.[mcp]&quot;
+.venv/bin/hkb init
+</code></pre>
+<p>This creates your knowledge base at <code>~/.hkb/</code>. The virtual environment belongs to this source checkout; keep the checkout at a stable location. To install the synchronization and encrypted-credential extras as well, use <code>.[all]</code> instead of <code>.[mcp]</code>.</p>
+<h2 id="connect-your-client">Connect your client</h2>
+<p>Find the absolute executable path:</p>
+<pre><code class="language-bash">pwd
+</code></pre>
+<p>Append <code>/.venv/bin/hkb-mcp</code> to that directory. Put the resulting absolute path in your MCP client's server configuration. For clients using the <code>mcpServers</code> format:</p>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;hyperkb&quot;: {
+      &quot;command&quot;: &quot;/absolute/path/to/hyperkb/.venv/bin/hkb-mcp&quot;,
+      &quot;env&quot;: {&quot;HKB_SOURCE&quot;: &quot;my-client&quot;}
+    }
+  }
+}
+</code></pre>
+<p>Replace the path and client label. Do not use <code>~</code> inside the executable path: a client may launch the command without shell expansion. The client starts HyperKB as a subprocess. A fresh server can initialize the default knowledge base automatically if you skipped <code>hkb init</code>.</p>
+<p>For the full connection details and multiple clients, read <a href="mcp.html">MCP &amp; clients</a>.</p>
+<h2 id="save-one-useful-decision">Save one useful decision</h2>
+<p>These examples are MCP tool calls, not shell commands. Ask your agent to create a topic file:</p>
+<pre><code class="language-python">hkb_add(
+    create_file=True,
+    to=&quot;infra.postgres&quot;,
+    description=&quot;Postgres connection settings and the reasons behind them.&quot;,
+    keywords=[&quot;postgres&quot;, &quot;connection&quot;, &quot;pool&quot;]
+)
+</code></pre>
+<p>Then save a decision with its rationale:</p>
+<pre><code class="language-python">hkb_add(
+    to=&quot;infra.postgres&quot;,
+    content=&quot;@type: decision\nUse a connection pool limit of 20. Higher limits exhaust our worker budget under load.&quot;
+)
+</code></pre>
+<p>The response includes the file and an entry epoch. Keep that pair when you need to update or link to this entry.</p>
+<h2 id="retrieve-it-in-another-session">Retrieve it in another session</h2>
+<pre><code class="language-python">hkb_search(query=&quot;connection pool&quot;, domain=&quot;infra&quot;)
+hkb_context(topic=&quot;postgres connection limits&quot;, max_tokens=2000)
+hkb_show(name=&quot;infra.postgres&quot;)
+</code></pre>
+<p>The Markdown file lives at <code>~/.hkb/storage/infra.postgres.md</code>. You can read it in an ordinary text editor. Search uses a rebuildable SQLite index alongside ripgrep.</p>
+<h2 id="choose-another-location">Choose another location</h2>
+<pre><code class="language-bash">.venv/bin/hkb init --path /absolute/path/to/my-knowledge
+</code></pre>
+<p>Use the same root in your MCP configuration:</p>
+<pre><code class="language-json">{
+  &quot;command&quot;: &quot;/absolute/path/to/hyperkb/.venv/bin/hkb-mcp&quot;,
+  &quot;args&quot;: [&quot;--path&quot;, &quot;/absolute/path/to/my-knowledge&quot;],
+  &quot;env&quot;: {&quot;HKB_SOURCE&quot;: &quot;my-client&quot;}
+}
+</code></pre>
+<p>The root is the directory <strong>containing</strong> <code>.hkb</code>, not <code>.hkb/storage</code> itself.</p>
+<h2 id="if-something-goes-wrong">If something goes wrong</h2>
+<p>Run <code>hkb doctor</code> from your virtual environment for a read-only health report. Use <code>hkb reindex</code> to rebuild the index from Markdown, even if MCP cannot start. Both accept <code>--path ROOT</code>. See <a href="operations.html">maintenance &amp; recovery</a> before moving or restoring data.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#requirements">Requirements</a><a class="toc-level-2" href="#install-from-source">Install from source</a><a class="toc-level-2" href="#connect-your-client">Connect your client</a><a class="toc-level-2" href="#save-one-useful-decision">Save one useful decision</a><a class="toc-level-2" href="#retrieve-it-in-another-session">Retrieve it in another session</a><a class="toc-level-2" href="#choose-another-location">Choose another location</a><a class="toc-level-2" href="#if-something-goes-wrong">If something goes wrong</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

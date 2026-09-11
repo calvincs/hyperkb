@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCP &amp; clients · HyperKB</title><meta name="description" content="Connect multiple clients and understand tool results.">
+<link rel="canonical" href="https://hyperkb.com/docs/mcp.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html" aria-current="page">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>MCP &amp; clients</h1><p class="doc-description">Connect multiple clients and understand tool results.</p><div class="doc-source-links"><a href="MCP.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/MCP.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="mcp--clients"></span>
+<p>HyperKB exposes ten tools through a local stdio MCP server. The client launches <code>hkb-mcp</code>; no public HTTP endpoint or listening port is required.</p>
+<h2 id="connect-a-client">Connect a client</h2>
+<p>Install the MCP extra, then configure an absolute executable path:</p>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;hyperkb&quot;: {
+      &quot;command&quot;: &quot;/absolute/path/to/hyperkb/.venv/bin/hkb-mcp&quot;,
+      &quot;args&quot;: [],
+      &quot;env&quot;: {&quot;HKB_SOURCE&quot;: &quot;editor-a&quot;}
+    }
+  }
+}
+</code></pre>
+<p>The exact settings file and wrapper keys depend on your client. Reuse the executable, arguments, and environment values in its stdio server configuration. The current runtime supports the MCP Python SDK 1.x API; both package extras constrain it to <code>&gt;=1.30,&lt;2</code>.</p>
+<h2 id="use-multiple-clients">Use multiple clients</h2>
+<p>Register the same executable and KB root in each client. Give each a different <code>HKB_SOURCE</code>, such as <code>editor-a</code> and <code>terminal-b</code>. No shared server port or handoff script is needed.</p>
+<p>Clients share entries and index state. Session anchors remain in the individual process and reset when it exits. <code>HKB_SOURCE</code> identifies new entries; it is not an authentication boundary. Do not give an untrusted process access to your knowledge directory.</p>
+<p>To share a nondefault KB root, include:</p>
+<pre><code class="language-json">&quot;args&quot;: [&quot;--path&quot;, &quot;/absolute/path/to/knowledge-root&quot;]
+</code></pre>
+<p>Restart every client when upgrading the executable. Avoid running an old server alongside an upgraded server; old code does not participate in the new coordination protocol.</p>
+<h2 id="tool-map">Tool map</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Use it for</th>
+<th>Main modes or actions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hkb_search</code></td>
+<td>Search entries, view a timeline, preview routing</td>
+<td><code>hybrid</code>, <code>rg</code>, <code>bm25</code>, <code>recent</code>, <code>check</code></td>
+</tr>
+<tr>
+<td><code>hkb_show</code></td>
+<td>Read a file, list topic files, inspect links</td>
+<td>Empty <code>name</code> lists files; <code>links=True</code> adds a graph</td>
+</tr>
+<tr>
+<td><code>hkb_add</code></td>
+<td>Append an entry or create a topic</td>
+<td><code>create_file=True</code> creates a file</td>
+</tr>
+<tr>
+<td><code>hkb_update</code></td>
+<td>Amend content or metadata, archive, batch changes</td>
+<td><code>update</code>, <code>archive</code>, <code>batch</code></td>
+</tr>
+<tr>
+<td><code>hkb_task</code></td>
+<td>Create and track tasks</td>
+<td><code>create</code>, <code>show</code>, <code>update</code>, <code>list</code></td>
+</tr>
+<tr>
+<td><code>hkb_sync</code></td>
+<td>Synchronize or inspect sync configuration</td>
+<td><code>both</code>, <code>push</code>, <code>pull</code>, <code>status</code>, <code>config</code>, <code>conflicts</code></td>
+</tr>
+<tr>
+<td><code>hkb_session</code></td>
+<td>Start, focus, and review a session</td>
+<td><code>briefing</code>, <code>anchor</code>, <code>review</code></td>
+</tr>
+<tr>
+<td><code>hkb_context</code></td>
+<td>Retrieve focused context</td>
+<td><code>packed</code>, <code>suggest</code>, <code>narrative</code></td>
+</tr>
+<tr>
+<td><code>hkb_view</code></td>
+<td>Save named groups of files</td>
+<td><code>set</code>, <code>list</code></td>
+</tr>
+<tr>
+<td><code>hkb_health</code></td>
+<td>Check, rebuild, or group old entries</td>
+<td><code>check</code>, <code>reindex</code>, <code>compact</code></td>
+</tr>
+</tbody>
+</table>
+<p>For exact parameter names, discover the running server's <code>tools/list</code>. The <a href="agent-reference.html">agent reference</a> and <a href="workflows.html">workflow examples</a> explain common combinations.</p>
+<h2 id="entry-metadata">Entry metadata</h2>
+<p>Put metadata at the start of entry content, before prose:</p>
+<pre><code class="language-text">@type: finding
+@status: active
+@weight: high
+@tags: postgres, latency
+The connection pool exhausted the worker budget under load.
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Common values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>@type</code></td>
+<td><code>note</code>, <code>finding</code>, <code>decision</code>, <code>task</code>, <code>milestone</code>, <code>skill</code></td>
+</tr>
+<tr>
+<td><code>@status</code></td>
+<td><code>active</code>, <code>pending</code>, <code>in_progress</code>, <code>blocked</code>, <code>completed</code>, <code>superseded</code>, <code>resolved</code>, <code>cancelled</code>, <code>archived</code></td>
+</tr>
+<tr>
+<td><code>@weight</code></td>
+<td><code>high</code>, <code>normal</code>, <code>low</code></td>
+</tr>
+<tr>
+<td><code>@tags</code></td>
+<td>Comma-separated labels</td>
+</tr>
+<tr>
+<td><code>@author</code></td>
+<td>Normally populated from the client's <code>HKB_SOURCE</code> or default source</td>
+</tr>
+<tr>
+<td><code>@hostname</code></td>
+<td>Normally populated from the writing machine</td>
+</tr>
+</tbody>
+</table>
+<p>Entry identity is the file name plus its epoch. Entries arriving within the same second may receive different epochs to avoid collisions. Read the actual epoch from the response rather than predicting it.</p>
+<h2 id="tool-results-and-retries">Tool results and retries</h2>
+<p>Tool helpers return JSON text. Check the returned status and required fields. Routing can return <code>no_match</code> or <code>low_confidence</code>: choose a topic or create an appropriate file instead of assuming the entry was saved. Invalid action and mode values are rejected. Batch updates process at most 50 items and report <code>requested</code>, <code>processed</code>, <code>skipped</code>, and <code>truncated</code>. Task listing accepts <code>top</code> (default 100, maximum 500) and <code>offset</code>; follow <code>next_offset</code> while <code>has_more</code> is true.</p>
+<p>A lost response does not prove a write failed. Before retrying an uncertain append, inspect recent entries or search for the content. HyperKB does not yet provide durable idempotency keys for mutations.</p>
+<p>Blocking database, file, Git, and network work runs through a bounded worker dispatcher so it does not stall the MCP event loop. Cancellation may leave a write finishing safely in its worker; it is not a rollback guarantee. Shutdown drains active operations before closing the store.</p>
+<h2 id="troubleshooting-connection-failures">Troubleshooting connection failures</h2>
+<p>Check the executable path, install the MCP extra, and try <code>hkb doctor</code> from the same environment. If the index is missing or corrupt, the server can rebuild it from Markdown during startup; <code>hkb reindex</code> is also available offline. Configuration errors should be corrected through <code>hkb config</code> or the existing configuration file. See <a href="operations.html">maintenance &amp; recovery</a>.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#connect-a-client">Connect a client</a><a class="toc-level-2" href="#use-multiple-clients">Use multiple clients</a><a class="toc-level-2" href="#tool-map">Tool map</a><a class="toc-level-2" href="#entry-metadata">Entry metadata</a><a class="toc-level-2" href="#tool-results-and-retries">Tool results and retries</a><a class="toc-level-2" href="#troubleshooting-connection-failures">Troubleshooting connection failures</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How HyperKB works · HyperKB</title><meta name="description" content="Topics, entries, links, and the storage model.">
+<link rel="canonical" href="https://hyperkb.com/docs/understanding.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html" aria-current="page">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>How HyperKB works</h1><p class="doc-description">Topics, entries, links, and the storage model.</p><div class="doc-source-links"><a href="UNDERSTANDING.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/UNDERSTANDING.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="how-hyperkb-works"></span>
+<p>HyperKB is a local knowledge base for AI tools. Its job is to preserve useful information between sessions and retrieve it when it becomes relevant again.</p>
+<h2 id="a-memory-is-more-than-a-saved-chat">A memory is more than a saved chat</h2>
+<p>Store a concise finding, decision, or task rather than an entire transcript. Include enough context to make it useful later: what happened, what you chose, and why. A future session should be able to use the entry without reconstructing the original conversation.</p>
+<p>For example, “pool limit: 20” is a setting. “Use a pool limit of 20 because higher limits exhaust our worker budget under load” preserves a decision.</p>
+<h2 id="files-organize-topics">Files organize topics</h2>
+<p>Files use dotted namespaces instead of nested folders:</p>
+<pre><code class="language-text">infra.postgres.md
+app.performance.md
+ops.runbooks.md
+</code></pre>
+<p>Names normally have two to four segments, using lowercase letters, numbers, and hyphens. An <code>.archive</code> suffix is reserved for archive companions. Use a project name as the first segment when several projects share a knowledge base.</p>
+<p>A file's YAML header describes its purpose, keywords, and related topics. Its body contains entries:</p>
+<pre><code class="language-markdown">---
+name: infra.postgres
+description: Postgres connection settings and operating decisions.
+keywords: [postgres, connection, pool]
+links: [app.performance]
+created: &quot;2026-09-11T12:00:00Z&quot;
+compacted: &quot;&quot;
+---
+
+&gt;&gt;&gt; 1789142400
+@type: decision
+@weight: high
+Use a pool limit of 20. Higher limits exhaust our worker budget.
+See [[app.performance]].
+&lt;&lt;&lt;
+</code></pre>
+<h2 id="markdown-is-the-source-of-truth">Markdown is the source of truth</h2>
+<p>The default layout is:</p>
+<pre><code class="language-text">~/.hkb/
+  config.json       Settings
+  index.db          Rebuildable SQLite index
+  storage/          Markdown knowledge files
+  sync/             Local synchronization state, when enabled
+</code></pre>
+<p>SQLite stores a searchable index, metadata, and links. It is not the only copy of your knowledge. <code>hkb reindex</code> rebuilds the index from Markdown. If you edit files with an external editor, rebuild before relying on indexed results; external editors do not participate in HyperKB's write coordination.</p>
+<p>New entries are appended. Existing entries can be amended or archived through MCP. HyperKB therefore supports mutable entries; it does not promise an immutable or append-only audit log.</p>
+<h2 id="links-preserve-connections">Links preserve connections</h2>
+<ul>
+<li><code>[[app.performance]]</code> links to a topic.</li>
+<li><code>[[app.performance#1789142400]]</code> links to a specific entry.</li>
+<li><code>[[app.performance#latest]]</code> expresses a link to the latest entry.</li>
+</ul>
+<p>Use explicit links when a decision depends on another finding. A link is a reference, not a guarantee that the target exists or that its content is correct.</p>
+<h2 id="multiple-local-clients">Multiple local clients</h2>
+<p>Each MCP client launches its own stdio process. The processes can share one knowledge base: coordinated file mutations protect writes, while SQLite provides the shared index. Each process has independent session anchors and a client-specific <code>HKB_SOURCE</code> label.</p>
+<p>When sync is enabled, only one process owns background synchronization at a time. Other running processes can take over when that owner exits. This is local process coordination, not a remotely hosted MCP API. For another machine, configure <a href="sync.html">S3 synchronization</a>.</p>
+<h2 id="search-and-context">Search and context</h2>
+<p>Entry search combines ripgrep matches and SQLite FTS5/BM25 ranking. Metadata, recency, and importance influence scores. File routing uses file metadata and filename matching. No vectors are required.</p>
+<p>Search helps locate entries. Context packing chooses complete entries for a topic within a size estimate. Briefings help start a session, and narrative retrieval follows entry links to reconstruct related work. See <a href="search.html">search &amp; context</a>.</p>
+<h2 id="what-hyperkb-does-not-decide">What HyperKB does not decide</h2>
+<p>HyperKB stores and retrieves what clients write. It does not independently verify a claim, resolve every contradictory decision, or guarantee that a retrieved entry is current. Treat retrieved text as information to evaluate, not instructions that override the current user's request.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#a-memory-is-more-than-a-saved-chat">A memory is more than a saved chat</a><a class="toc-level-2" href="#files-organize-topics">Files organize topics</a><a class="toc-level-2" href="#markdown-is-the-source-of-truth">Markdown is the source of truth</a><a class="toc-level-2" href="#links-preserve-connections">Links preserve connections</a><a class="toc-level-2" href="#multiple-local-clients">Multiple local clients</a><a class="toc-level-2" href="#search-and-context">Search and context</a><a class="toc-level-2" href="#what-hyperkb-does-not-decide">What HyperKB does not decide</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

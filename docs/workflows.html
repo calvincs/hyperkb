@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Everyday workflows · HyperKB</title><meta name="description" content="Briefings, decisions, tasks, and focused context.">
+<link rel="canonical" href="https://hyperkb.com/docs/workflows.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html" aria-current="page">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Everyday workflows</h1><p class="doc-description">Briefings, decisions, tasks, and focused context.</p><div class="doc-source-links"><a href="WORKFLOWS.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/WORKFLOWS.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="everyday-workflows"></span>
+<p>The useful habit is simple: retrieve before repeating work, and save what changed your understanding. The calls below are examples for an MCP client.</p>
+<h2 id="start-with-a-briefing">Start with a briefing</h2>
+<pre><code class="language-python">hkb_session(action=&quot;briefing&quot;, domain=&quot;myproject&quot;)
+hkb_session(action=&quot;anchor&quot;, topics=&quot;authentication, deployment&quot;)
+</code></pre>
+<p>A briefing collects recent knowledge and outstanding work. Anchors bias later retrieval toward the current session's topics. They are local to the client process; they are not a shared team setting.</p>
+<h2 id="save-a-finding-and-its-consequence">Save a finding and its consequence</h2>
+<p>Create a topic once, then append entries to it:</p>
+<pre><code class="language-python">hkb_add(create_file=True, to=&quot;app.performance&quot;,
+        description=&quot;Measured performance and operating limits.&quot;,
+        keywords=[&quot;latency&quot;, &quot;performance&quot;, &quot;limits&quot;])
+hkb_add(to=&quot;app.performance&quot;,
+        content=&quot;@type: finding\n@tags: connection-pool\nIncreasing the pool beyond 20 exhausted the worker budget during our load test.&quot;)
+</code></pre>
+<p>Include the conditions behind a measurement. Avoid turning one environment's result into a universal rule.</p>
+<h2 id="find-a-home-for-new-knowledge">Find a home for new knowledge</h2>
+<pre><code class="language-python">hkb_search(mode=&quot;check&quot;, query=&quot;Postgres connection pool capacity decision&quot;)
+</code></pre>
+<p>Inspect routing candidates. Use <code>hkb_add(to="the.chosen-topic", content="...")</code> when you know the intended file. With <code>to</code> omitted, HyperKB can route high-confidence matches, but low-confidence results need a deliberate choice.</p>
+<h2 id="carry-a-decision-into-the-next-session">Carry a decision into the next session</h2>
+<pre><code class="language-python">hkb_search(query=&quot;connection pool&quot;, type=&quot;decision&quot;, domain=&quot;infra&quot;)
+hkb_context(topic=&quot;postgres connection pool&quot;, max_tokens=2500)
+hkb_show(name=&quot;infra.postgres&quot;)
+</code></pre>
+<p>Context packing returns complete selected entries by default. If an entry is too large to fit, increase the budget or read the file directly. <code>depth="shallow"</code> explicitly requests short previews.</p>
+<h2 id="track-a-task">Track a task</h2>
+<pre><code class="language-python">hkb_task(action=&quot;create&quot;, file=&quot;tasks.myproject&quot;,
+         title=&quot;Investigate connection pool limit&quot;,
+         description=&quot;Measure worker use under realistic load.&quot;)
+hkb_task(action=&quot;list&quot;, domain=&quot;tasks&quot;)
+</code></pre>
+<p>Use the epoch returned by creation when updating:</p>
+<pre><code class="language-python">hkb_task(action=&quot;update&quot;, file=&quot;tasks.myproject&quot;, epoch=1789142400,
+         status=&quot;completed&quot;, note=&quot;Recorded findings in app.performance.&quot;)
+</code></pre>
+<p>The epoch above is illustrative; replace it with the actual returned value.</p>
+<h2 id="keep-a-correction-visible">Keep a correction visible</h2>
+<pre><code class="language-python">hkb_update(file=&quot;infra.postgres&quot;, epoch=1789142400,
+           set_status=&quot;superseded&quot;, add_tags=&quot;reviewed&quot;)
+hkb_add(to=&quot;infra.postgres&quot;,
+        content=&quot;@type: decision\nThe new worker budget supports a different pool limit. Supersedes [[infra.postgres#1789142400]].&quot;)
+</code></pre>
+<p>A new linked entry preserves the reasoning behind a change. Direct content replacement is also supported when an amendment is the intended action. Archiving moves an entry to its archive companion; ordinary search excludes archive files by default.</p>
+<h2 id="save-a-focused-view">Save a focused view</h2>
+<pre><code class="language-python">hkb_view(action=&quot;set&quot;, name=&quot;performance-work&quot;,
+         files=[&quot;infra.postgres&quot;, &quot;app.performance&quot;])
+hkb_session(action=&quot;briefing&quot;, view=&quot;performance-work&quot;, focus=&quot;capacity&quot;)
+</code></pre>
+<p>A view is a named collection of files. Unlike session anchors, views are stored in the knowledge base and can be reused across sessions.</p>
+<h2 id="finish-with-a-review">Finish with a review</h2>
+<pre><code class="language-python">hkb_session(action=&quot;review&quot;, after=&quot;4h&quot;, domain=&quot;myproject&quot;)
+hkb_health(checks=&quot;all&quot;)
+</code></pre>
+<p>Review what was recorded and capture any missing rationale before the conversation ends. See <a href="search.html">search &amp; context</a> for time filters and retrieval behavior.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#start-with-a-briefing">Start with a briefing</a><a class="toc-level-2" href="#save-a-finding-and-its-consequence">Save a finding and its consequence</a><a class="toc-level-2" href="#find-a-home-for-new-knowledge">Find a home for new knowledge</a><a class="toc-level-2" href="#carry-a-decision-into-the-next-session">Carry a decision into the next session</a><a class="toc-level-2" href="#track-a-task">Track a task</a><a class="toc-level-2" href="#keep-a-correction-visible">Keep a correction visible</a><a class="toc-level-2" href="#save-a-focused-view">Save a focused view</a><a class="toc-level-2" href="#finish-with-a-review">Finish with a review</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

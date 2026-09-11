@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HyperKB · HyperKB</title><meta name="description" content="What HyperKB does and where to begin.">
+<link rel="canonical" href="https://hyperkb.com/docs/overview.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html" aria-current="page">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>HyperKB</h1><p class="doc-description">What HyperKB does and where to begin.</p><div class="doc-source-links"><a href="../README.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/README.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="hyperkb"></span>
+<p><strong>Pick up where your last session left off.</strong></p>
+<p>HyperKB gives AI tools a persistent place for findings, decisions, tasks, and the reasons behind them. Knowledge lives in Markdown you own. Ripgrep and SQLite/BM25 make it searchable; ten MCP tools bring it into your next session.</p>
+<p><a href="https://hyperkb.com/">Website</a> · <a href="getting-started.html">Documentation</a> · <a href="../llm.txt">Agent guide</a> · <a href="mcp.html">MCP reference</a></p>
+<h2 id="start-in-a-few-commands">Start in a few commands</h2>
+<p>With Python 3.10+ and <a href="https://github.com/BurntSushi/ripgrep#installation">ripgrep</a>:</p>
+<pre><code class="language-bash">git clone https://github.com/calvincs/hyperkb
+cd hyperkb
+python3 -m venv .venv
+.venv/bin/pip install -e &quot;.[mcp]&quot;
+.venv/bin/hkb init
+</code></pre>
+<p>Register the absolute path to <code>.venv/bin/hkb-mcp</code> in your MCP client:</p>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;hyperkb&quot;: {
+      &quot;command&quot;: &quot;/absolute/path/to/hyperkb/.venv/bin/hkb-mcp&quot;,
+      &quot;env&quot;: {&quot;HKB_SOURCE&quot;: &quot;my-client&quot;}
+    }
+  }
+}
+</code></pre>
+<p>The default KB is <code>~/.hkb/</code>. Use <code>hkb init --path ROOT</code> and server arguments <code>["--path", "ROOT"]</code> for another location. See <a href="getting-started.html">the setup guide</a> for complete instructions.</p>
+<h2 id="save-the-reason-not-just-the-setting">Save the reason, not just the setting</h2>
+<p>Through your MCP client:</p>
+<pre><code class="language-python">hkb_add(create_file=True, to=&quot;infra.postgres&quot;,
+        description=&quot;Postgres connection settings and operating decisions.&quot;,
+        keywords=[&quot;postgres&quot;, &quot;connection&quot;, &quot;pool&quot;])
+hkb_add(to=&quot;infra.postgres&quot;,
+        content=&quot;@type: decision\nUse a pool limit of 20. Higher limits exhaust our worker budget under load.&quot;)
+hkb_search(query=&quot;connection pool&quot;, domain=&quot;infra&quot;)
+hkb_context(topic=&quot;postgres connection limits&quot;, max_tokens=2000)
+</code></pre>
+<p>Entries use <code>&gt;&gt;&gt; epoch</code> / <code>&lt;&lt;&lt;</code> delimiters and optional metadata. Topic filenames are dotted namespaces such as <code>infra.postgres.md</code>. Connect related entries with <code>[[app.performance]]</code> or <code>[[app.performance#epoch]]</code>.</p>
+<h2 id="what-it-provides">What it provides</h2>
+<ul>
+<li>Human-readable Markdown storage and a rebuildable SQLite index.</li>
+<li>Hybrid entry search, metadata filters, complete context retrieval, session briefings, and linked narratives.</li>
+<li>Multiple local MCP clients with coordinated writes, separate session anchors, and source attribution.</li>
+<li>Entry amendments, archive companions, task lifecycles, and saved topic views.</li>
+<li>Optional synchronization through your S3-compatible storage, with staged merges and one background leader per local KB.</li>
+<li>Offline <code>hkb doctor</code> and <code>hkb reindex</code> for recovery when MCP is unavailable.</li>
+</ul>
+<p>Search runs locally without an embedding model or a model API key. Entry amendments are supported; this is not an immutable append-only log. Context budgets use a response-size estimate rather than a particular model tokenizer.</p>
+<h2 id="documentation">Documentation</h2>
+<table>
+<thead>
+<tr>
+<th>Guide</th>
+<th>What you will learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="getting-started.html">Getting started</a></td>
+<td>Install, connect, save, and retrieve</td>
+</tr>
+<tr>
+<td><a href="understanding.html">How it works</a></td>
+<td>Files, entries, links, and the shared local KB</td>
+</tr>
+<tr>
+<td><a href="mcp.html">MCP &amp; clients</a></td>
+<td>Connection settings, ten tools, results, and retries</td>
+</tr>
+<tr>
+<td><a href="workflows.html">Everyday workflows</a></td>
+<td>Briefings, decisions, tasks, and focused views</td>
+</tr>
+<tr>
+<td><a href="search.html">Search &amp; context</a></td>
+<td>Modes, filters, ranking, and estimated budgets</td>
+</tr>
+<tr>
+<td><a href="sync.html">Synchronization</a></td>
+<td>S3 setup, directions, conflicts, and upgrades</td>
+</tr>
+<tr>
+<td><a href="operations.html">Maintenance &amp; recovery</a></td>
+<td>Health, reindex, backups, and compaction</td>
+</tr>
+<tr>
+<td><a href="configuration.html">Configuration</a></td>
+<td>Settings, provenance, credentials, and extras</td>
+</tr>
+<tr>
+<td><a href="agent-reference.html">Agent reference</a></td>
+<td>Tool selection and practical call examples</td>
+</tr>
+</tbody>
+</table>
+<p>The website publishes readable versions of these canonical Markdown guides, including source links and machine-readable entry points. <a href="https://github.com/calvincs/hyperkb/blob/main/docs/WEBSITE.md">Website maintenance</a> explains the build and validation workflow.</p>
+<h2 id="upgrading-an-existing-installation">Upgrading an existing installation</h2>
+<p>Restart every local MCP client after upgrading. The reliability update uses <strong>sync manifest version 2</strong> with immutable content blobs and deletion records. Upgrade all clients sharing a bucket/prefix before an upgraded client publishes to it; old clients cannot safely read this format. Back up the local Markdown and remote destination first. See <a href="sync.html#upgrade-existing-installations-first">the migration guide</a>.</p>
+<h2 id="development">Development</h2>
+<pre><code class="language-bash">.venv/bin/pip install -e &quot;.[all,dev]&quot;
+PYTHONPATH=. .venv/bin/pytest tests/ -q
+.venv/bin/pip install -r website/requirements.txt
+.venv/bin/python scripts/build_site.py
+.venv/bin/python scripts/check_site.py
+</code></pre>
+<p>The website is static HTML, CSS, and JavaScript. The only documentation renderer dependency is build-time Python-Markdown. See <a href="https://github.com/calvincs/hyperkb/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.</p>
+<h2 id="license">License</h2>
+<p><a href="../license.html">MIT</a>.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#start-in-a-few-commands">Start in a few commands</a><a class="toc-level-2" href="#save-the-reason-not-just-the-setting">Save the reason, not just the setting</a><a class="toc-level-2" href="#what-it-provides">What it provides</a><a class="toc-level-2" href="#documentation">Documentation</a><a class="toc-level-2" href="#upgrading-an-existing-installation">Upgrading an existing installation</a><a class="toc-level-2" href="#development">Development</a><a class="toc-level-2" href="#license">License</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

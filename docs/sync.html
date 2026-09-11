@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Synchronization between machines · HyperKB</title><meta name="description" content="Set up a destination, upgrade safely, and resolve conflicts.">
+<link rel="canonical" href="https://hyperkb.com/docs/sync.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html" aria-current="page">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Synchronization between machines</h1><p class="doc-description">Set up a destination, upgrade safely, and resolve conflicts.</p><div class="doc-source-links"><a href="SYNC.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/SYNC.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="synchronization-between-machines"></span>
+<p>Sync is optional. Each machine keeps a local knowledge base; an S3-compatible bucket holds the shared remote state. Git tracks local file history. No remote bucket is required for local memory and search.</p>
+<h2 id="upgrade-existing-installations-first">Upgrade existing installations first</h2>
+<p>The reliability update introduces <strong>sync manifest version 2</strong> with immutable content objects and explicit deletion records. It can read legacy manifests, but older HyperKB clients cannot safely interpret the new blob references. Upgrade and restart <strong>every client using a bucket/prefix before an upgraded client publishes to it</strong>. Do not mix old and new clients against the same destination.</p>
+<p>Back up each machine's Markdown and the remote bucket before a coordinated upgrade. For a staged trial, configure a separate bucket prefix. Unknown manifest versions are rejected rather than guessed.</p>
+<h2 id="set-up-a-destination">Set up a destination</h2>
+<p>Install Git and the sync extras:</p>
+<pre><code class="language-bash">.venv/bin/pip install -e &quot;.[all]&quot;
+.venv/bin/hkb sync setup
+</code></pre>
+<p>The setup wizard asks for your bucket, prefix, region, optional endpoint, and credentials. Use a dedicated prefix for this knowledge base. Configuration is also available through <code>hkb config</code> and the MCP <code>hkb_sync(action="config")</code> tool.</p>
+<p>Credential overrides are <code>HKB_SYNC_ACCESS_KEY</code> and <code>HKB_SYNC_SECRET_KEY</code>. Use your environment or a hidden prompt rather than putting secrets into a saved conversation or shell command. A machine-derived encryption key is used when saving credentials with the crypto extra; it is not a substitute for operating-system access controls or portable secret management.</p>
+<p>For a custom S3-compatible service, set <code>sync_endpoint_url</code>. Compatibility requires conditional object writes and deletes used by the lease and conditional manifest publication; an endpoint that cannot provide them should fail safely rather than pretend synchronization is exclusive.</p>
+<h2 id="preview-before-applying">Preview before applying</h2>
+<pre><code class="language-python">hkb_sync(action=&quot;both&quot;, dry_run=True)
+hkb_sync(action=&quot;both&quot;)
+hkb_sync(action=&quot;status&quot;)
+</code></pre>
+<p>The dry run reports pending changes. Inspect its status instead of assuming every sync attempt ran: another machine may hold the lease, or the endpoint may be unavailable.</p>
+<h2 id="choose-a-direction">Choose a direction</h2>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Intended effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>both</code></td>
+<td>Retrieve remote changes, preserve/merge local changes, and publish the resulting state</td>
+</tr>
+<tr>
+<td><code>pull</code></td>
+<td>Bring in remote changes without acknowledging unuploaded local changes</td>
+</tr>
+<tr>
+<td><code>push</code></td>
+<td>Publish local changes while preserving remote inventory for unrelated paths</td>
+</tr>
+</tbody>
+</table>
+<p>A stored baseline distinguishes local additions from remote deletions. A machine without a baseline does not treat every file it lacks as a local deletion. Explicit tombstones preserve deletion history.</p>
+<h2 id="what-happens-during-sync">What happens during sync</h2>
+<ol>
+<li>Obtain a conditional remote lease with a unique owner token.</li>
+<li>Read the manifest under that lease and compare it with local and previously synchronized state.</li>
+<li>Download and verify remote content in staging, then merge files with their common ancestor.</li>
+<li>Publish local mutations through the same storage coordination used by MCP writes.</li>
+<li>Upload immutable content objects and conditionally publish the new manifest only after their contents exist; a stale inventory cannot overwrite a newer publication.</li>
+<li>Record the new baseline and update the index for applied changes, including deletions.</li>
+</ol>
+<p>Remote file names and hashes are validated. The live storage directory is not temporarily checked out onto a remote branch. Unrelated local files remain in the remote manifest during a push.</p>
+<h2 id="multiple-clients-on-one-machine">Multiple clients on one machine</h2>
+<p>One running MCP process owns the background sync worker. Other clients can continue using the same local KB, and an eligible follower can take over after the leader exits. Manual sync and background sync coordinate through the storage lock and remote lease.</p>
+<p>The normal polling interval is controlled by <code>sync_interval</code>. With watchdog installed, file changes can also request a debounced sync. Changing sync settings through MCP restarts the local worker with the updated settings. Clients started while sync was disabled need to reconnect after another process enables it to join the follower pool. For coordinated upgrades, close and restart all clients.</p>
+<h2 id="conflicts-and-interruptions">Conflicts and interruptions</h2>
+<pre><code class="language-python">hkb_sync(action=&quot;conflicts&quot;)
+</code></pre>
+<p>Review conflict records when concurrent changes need attention. The merge path preserves competing entry content rather than silently choosing one version as universally correct. A sync failure may leave successfully completed work in place; inspect status and local files before assuming the entire attempt was rolled back.</p>
+<p>Version 2 blobs and tombstones are retained to support safe publication and recovery. Automatic garbage collection of remote historical objects and automatic squashing of local Git history are not provided by this update; plan storage retention deliberately. Do not remove blobs still referenced by a manifest or deletion record.</p>
+<h2 id="recovery-and-limits">Recovery and limits</h2>
+<p>The bucket is a synchronization destination, not a complete backup policy. Keep independent backups and consider versioning at your storage provider. Local Git history and retained blobs help recovery but do not protect against every operator error.</p>
+<p>A missing manifest with existing remote objects stops synchronization. Restore the inventory from backup; legacy inventories can be explicitly rebuilt by an administrator, while immutable objects alone cannot recover their filenames or deletion history.</p>
+<p>Sync holds the shared mutation lock while handling a snapshot, including its network operations. Indexed reads in other clients can continue, but writes may wait or time out during a slow sync. This trades write latency for a consistent first implementation.</p>
+<p>Offline edits remain local until synchronization succeeds. A network connection from another machine to <code>hkb-mcp</code> is not part of this setup: that machine runs its own MCP process and knowledge base, then shares the configured remote state.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#upgrade-existing-installations-first">Upgrade existing installations first</a><a class="toc-level-2" href="#set-up-a-destination">Set up a destination</a><a class="toc-level-2" href="#preview-before-applying">Preview before applying</a><a class="toc-level-2" href="#choose-a-direction">Choose a direction</a><a class="toc-level-2" href="#what-happens-during-sync">What happens during sync</a><a class="toc-level-2" href="#multiple-clients-on-one-machine">Multiple clients on one machine</a><a class="toc-level-2" href="#conflicts-and-interruptions">Conflicts and interruptions</a><a class="toc-level-2" href="#recovery-and-limits">Recovery and limits</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

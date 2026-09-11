@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configuration · HyperKB</title><meta name="description" content="Settings, optional capabilities, and credential handling.">
+<link rel="canonical" href="https://hyperkb.com/docs/configuration.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html" aria-current="page">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Configuration</h1><p class="doc-description">Settings, optional capabilities, and credential handling.</p><div class="doc-source-links"><a href="CONFIGURATION.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/CONFIGURATION.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="configuration"></span>
+<p>HyperKB stores settings in <code>.hkb/config.json</code> beneath the knowledge root. The default root is your home directory.</p>
+<h2 id="read-and-change-a-setting">Read and change a setting</h2>
+<pre><code class="language-bash">hkb config rg_weight
+hkb config rg_weight 0.5
+hkb config default_source my-client
+</code></pre>
+<p>Add <code>--path /absolute/path/to/knowledge-root</code> for a nondefault KB. Configuration writes are validated and published atomically. Use <code>--path</code> to select a knowledge base rather than changing the stored <code>root</code> field.</p>
+<h2 id="common-settings">Common settings</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rg_weight</code></td>
+<td>Contribution from ripgrep matches</td>
+</tr>
+<tr>
+<td><code>bm25_weight</code></td>
+<td>Contribution from BM25 matches</td>
+</tr>
+<tr>
+<td><code>route_confidence_threshold</code></td>
+<td>Minimum confidence for automatic routing</td>
+</tr>
+<tr>
+<td><code>rg_timeout</code></td>
+<td>Ripgrep timeout in seconds</td>
+</tr>
+<tr>
+<td><code>max_entry_size</code></td>
+<td>Maximum accepted entry bytes</td>
+</tr>
+<tr>
+<td><code>recency_half_life_days</code></td>
+<td>Recency scoring timescale</td>
+</tr>
+<tr>
+<td><code>default_source</code></td>
+<td>Default author label when <code>HKB_SOURCE</code> is absent</td>
+</tr>
+<tr>
+<td><code>sync_enabled</code></td>
+<td>Enable optional remote synchronization</td>
+</tr>
+<tr>
+<td><code>sync_bucket</code>, <code>sync_prefix</code></td>
+<td>Remote destination</td>
+</tr>
+<tr>
+<td><code>sync_region</code>, <code>sync_endpoint_url</code></td>
+<td>Region and optional S3-compatible endpoint</td>
+</tr>
+<tr>
+<td><code>sync_interval</code></td>
+<td>Background synchronization interval</td>
+</tr>
+<tr>
+<td><code>sync_squash_threshold</code></td>
+<td>Retained legacy setting; automatic Git history squashing is disabled in the new sync engine</td>
+</tr>
+</tbody>
+</table>
+<p>The running configuration is the authority for defaults. Changes made through the admin CLI generally require client restart for the already-running process to use them. Sync settings are refreshed by the sync engine; MCP sync configuration also restarts its local worker.</p>
+<h2 id="client-specific-provenance">Client-specific provenance</h2>
+<p>Set <code>HKB_SOURCE</code> in each client's process environment. It takes precedence over <code>default_source</code>. HyperKB records the machine hostname automatically.</p>
+<p>The label identifies an origin for filtering. It is not a verified identity or an access-control rule. Do not share environment credentials merely to give clients the same label.</p>
+<h2 id="credentials">Credentials</h2>
+<pre><code class="language-bash">hkb config sync_access_key --set
+hkb config sync_secret_key --set
+</code></pre>
+<p>The hidden prompt avoids storing the secret in a shell command. You can also provide <code>HKB_SYNC_ACCESS_KEY</code> and <code>HKB_SYNC_SECRET_KEY</code> through your environment. Values shown by configuration tools are masked.</p>
+<p>The crypto extra encrypts saved credentials using machine-derived key material. Without the optional dependency, saving credentials can fall back to plaintext with a warning. Protect the configuration directory and use your environment or secret manager when appropriate. Do not copy credentials into documentation, logs, or MCP conversations.</p>
+<h2 id="install-only-the-capabilities-you-need">Install only the capabilities you need</h2>
+<table>
+<thead>
+<tr>
+<th>Extra</th>
+<th>Adds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mcp</code></td>
+<td>The supported MCP SDK and server integration</td>
+</tr>
+<tr>
+<td><code>crypto</code></td>
+<td>Encryption support for saved credential values</td>
+</tr>
+<tr>
+<td><code>sync</code></td>
+<td>S3 client (<code>boto3&gt;=1.40.0</code>, for conditional operations) and filesystem watcher</td>
+</tr>
+<tr>
+<td><code>all</code></td>
+<td>MCP, crypto, and sync</td>
+</tr>
+<tr>
+<td><code>dev</code></td>
+<td>Python tests and S3 mocking</td>
+</tr>
+</tbody>
+</table>
+<p>The documentation website has its own build-only dependency in <code>website/requirements.txt</code>; published pages are static HTML.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#read-and-change-a-setting">Read and change a setting</a><a class="toc-level-2" href="#common-settings">Common settings</a><a class="toc-level-2" href="#client-specific-provenance">Client-specific provenance</a><a class="toc-level-2" href="#credentials">Credentials</a><a class="toc-level-2" href="#install-only-the-capabilities-you-need">Install only the capabilities you need</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

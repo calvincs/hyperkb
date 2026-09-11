@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hyperkb Skill · HyperKB</title><meta name="description" content="A practical reference for agents using the ten MCP tools.">
+<link rel="canonical" href="https://hyperkb.com/docs/agent-reference.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html" aria-current="page">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>hyperkb Skill</h1><p class="doc-description">A practical reference for agents using the ten MCP tools.</p><div class="doc-source-links"><a href="../SKILL.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/SKILL.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="hyperkb-skill"></span>
+<h2 id="mental-model">Mental Model</h2>
+<p>Files are named topics (<code>domain.topic.subtopic</code>, 2-4 dot-separated segments). Each file holds timestamped entries delimited by <code>&gt;&gt;&gt; epoch</code> / <code>&lt;&lt;&lt;</code> markers. Entries have structured metadata (<code>@type</code>, <code>@status</code>, <code>@weight</code>, <code>@tags</code>) parsed from lines at the start of content. Wiki-links <code>[[file.name]]</code> cross-reference between files. Markdown files in <code>~/.hkb/storage/</code> are source of truth; SQLite is a rebuildable index.</p>
+<h2 id="which-tool-do-i-use">Which Tool Do I Use?</h2>
+<h3 id="i-need-to-find-something">I need to FIND something</h3>
+<ul>
+<li><strong>Know the file name</strong> → <code>hkb_show(name="file.name")</code> to read it</li>
+<li><strong>Don't know the file</strong> → <code>hkb_search(query="2-4 keywords")</code> — use keywords, not sentences</li>
+<li><strong>Need keyword matches in source files</strong> → <code>hkb_search(mode="rg", query="pool timeout")</code> (multiple words match as alternatives; the MCP tool does not expose a raw-regex option)</li>
+<li><strong>Want a list of all files</strong> → <code>hkb_show()</code> (no name)</li>
+<li><strong>Want cross-file timeline</strong> → <code>hkb_search(mode="recent")</code></li>
+<li><strong>Need token-budgeted context for a task</strong> → <code>hkb_context(topic="...")</code></li>
+<li>Use <code>hkb_search</code> when browsing/exploring. Use <code>hkb_context</code> when you need packed context to work with.</li>
+<li><strong>Want file suggestions for a topic</strong> → <code>hkb_context(mode="suggest", topic="...")</code></li>
+<li><strong>Want a chronological story</strong> → <code>hkb_context(mode="narrative", topic="...")</code></li>
+<li><strong>Want link graph</strong> → <code>hkb_show(name="file", links=True)</code></li>
+</ul>
+<h3 id="i-need-to-save-something">I need to SAVE something</h3>
+<ul>
+<li><strong>Know the target file</strong> → <code>hkb_add(content="...", to="file.name")</code></li>
+<li><strong>Unsure where it goes</strong> → <code>hkb_add(content="...")</code> (auto-routes) — then handle the response (see below)</li>
+<li><strong>Preview routing first</strong> → <code>hkb_search(mode="check", query="...")</code> to see candidates</li>
+<li><strong>Need a new file</strong> → <code>hkb_add(create_file=True, to="new.name", description="...", keywords=[...])</code>
+  then <code>hkb_add(content="...", to="new.name")</code> to add the first entry</li>
+</ul>
+<h3 id="i-need-to-update-something">I need to UPDATE something</h3>
+<ul>
+<li><strong>Amend entry content or metadata</strong> → <code>hkb_update(file="f", epoch=E, new_content="...", set_status="...", add_tags="...")</code></li>
+<li><strong>Archive an entry</strong> → <code>hkb_update(action="archive", file="f", epoch=E)</code></li>
+<li><strong>Supersede old info</strong> → Save new entry, then <code>hkb_update(file="f", epoch=OLD, set_status="superseded")</code></li>
+<li><strong>Bulk changes</strong> → <code>hkb_update(action="batch", updates=[...])</code></li>
+</ul>
+<h3 id="i-need-to-orient-myself">I need to ORIENT myself</h3>
+<ul>
+<li><strong>Session start</strong> → <code>hkb_session(action="briefing")</code> — overview of files, recent activity, open tasks</li>
+<li><strong>Focused briefing</strong> → <code>hkb_session(action="briefing", focus="topic")</code> or <code>view="view-name"</code></li>
+<li><strong>What changed recently</strong> → <code>hkb_session(action="review", after="1d")</code></li>
+<li><strong>Bias subsequent searches</strong> → <code>hkb_session(action="anchor", topics="auth, security")</code></li>
+<li>Anchoring applies a 1.5x score boost to matching files. It is NOT a filter — unanchored files still appear, just ranked lower.</li>
+</ul>
+<h3 id="i-need-to-manage">I need to MANAGE</h3>
+<ul>
+<li><strong>Tasks</strong> → <code>hkb_task(action="create/show/update/list")</code></li>
+<li><strong>Health checks</strong> → <code>hkb_health(checks="all", fix=True)</code> — finds orphan links, stale entries, sync issues</li>
+<li><strong>Reindex from disk</strong> → <code>hkb_health(action="reindex")</code></li>
+<li><strong>Compact old entries</strong> → <code>hkb_health(action="compact", file="...", dry_run=True)</code></li>
+<li><strong>Sync with S3</strong> → <code>hkb_sync(action="both")</code></li>
+<li><strong>Named views</strong> → <code>hkb_view(action="set", name="my-view", files=["a.b", "c.d"])</code></li>
+</ul>
+<h2 id="handling-hkb_add-responses">Handling hkb_add Responses</h2>
+<p>Every <code>hkb_add</code> call returns one of three results:</p>
+<table>
+<thead>
+<tr>
+<th>Response</th>
+<th>Meaning</th>
+<th>Next Step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"ok"</code></td>
+<td>Entry saved. May include <code>broken_links</code> warning.</td>
+<td>Done. Fix broken <code>[[links]]</code> if warned.</td>
+</tr>
+<tr>
+<td><code>"no_match"</code></td>
+<td>No file matched the content.</td>
+<td>Create a file first: <code>hkb_add(create_file=True, to="name", ...)</code>, then retry with <code>to=</code>.</td>
+</tr>
+<tr>
+<td><code>"low_confidence"</code></td>
+<td>Candidates found but none confident. Lists them.</td>
+<td>Pick one and retry with <code>to=</code>, OR create a new file.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Do NOT re-call <code>hkb_add</code> without setting <code>to=</code></strong> — auto-routing will return the same result every time.</p>
+<h2 id="writing-good-entries">Writing Good Entries</h2>
+<h3 id="entry-metadata-format">Entry metadata format</h3>
+<p><code>@key: value</code> lines at the START of entry content are parsed as metadata. They remain in the Markdown source and are indexed for filtering and scoring; returned content bodies separate the metadata from the prose.</p>
+<pre><code>@type: finding
+@status: active
+@weight: high
+@tags: security, auth
+Connection pool exhaustion occurs under 50+ concurrent requests.
+Root cause: default pool size of 10 with no timeout on checkout.
+See [[infra.postgres]] for the fix applied.
+</code></pre>
+<h3 id="types-and-when-to-use-them">Types and when to use them</h3>
+<table>
+<thead>
+<tr>
+<th>@type</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>note</code></td>
+<td>General observations, config values, context (default)</td>
+</tr>
+<tr>
+<td><code>finding</code></td>
+<td>Investigation results, root causes, measurements</td>
+</tr>
+<tr>
+<td><code>decision</code></td>
+<td>Conclusions with rationale — exempt from staleness penalty</td>
+</tr>
+<tr>
+<td><code>task</code></td>
+<td>Action items — prefer <code>hkb_task</code> for lifecycle tracking</td>
+</tr>
+<tr>
+<td><code>milestone</code></td>
+<td>Completion markers, version releases</td>
+</tr>
+<tr>
+<td><code>skill</code></td>
+<td>Reusable procedures — use Problem/Solution/Context format</td>
+</tr>
+</tbody>
+</table>
+<h3 id="type-skill-format">@type: skill format</h3>
+<p>Use for any procedural knowledge — workarounds, techniques, how-to steps:</p>
+<pre><code>@type: skill
+@tags: docker, networking
+Problem: Container can't reach host services on macOS.
+Solution: Use `host.docker.internal` instead of `localhost` in container config.
+Set `extra_hosts: [&quot;host.docker.internal:host-gateway&quot;]` in docker-compose.
+Context: Only needed on macOS/Windows Docker Desktop. Linux uses --network=host.
+</code></pre>
+<h3 id="good-vs-bad-entries">Good vs. bad entries</h3>
+<p><strong>Good:</strong> Self-contained, includes why, useful months later.</p>
+<pre><code>@type: finding
+BM25 search returns no results when query contains &quot;NOT&quot; or &quot;AND&quot; because
+FTS5 treats them as operators. Fixed by quoting reserved words in search.py.
+</code></pre>
+<p><strong>Bad:</strong> Vague, no context, not self-contained.</p>
+<pre><code>Fixed the search bug.
+</code></pre>
+<h3 id="other-metadata">Other metadata</h3>
+<ul>
+<li><code>@weight: high</code> — keeps entry prominent regardless of age. Use for ~5% of entries (architecture decisions, critical security findings). <code>@weight: low</code> for temporary workarounds.</li>
+<li><code>@tags: comma, separated</code> — cross-cutting labels for filtering.</li>
+<li><code>@author</code> / <code>@hostname</code> — auto-populated, never set manually.</li>
+</ul>
+<h3 id="content-constraints">Content constraints</h3>
+<ul>
+<li>Do not include entry delimiter lines such as <code>&gt;&gt;&gt; 1789142400</code> or <code>&lt;&lt;&lt;</code> in content</li>
+<li>Max entry size: 1 MiB</li>
+<li>One topic per entry — split multi-topic content into separate adds</li>
+</ul>
+<h2 id="file-naming">File Naming</h2>
+<p><code>domain.topic[.subtopic[.focus]].md</code> — 2-4 dot-separated lowercase segments with hyphens. Use project name as first segment for natural <code>domain=</code> filtering. Archives: 5 segments allowed when last is "archive" (e.g. <code>project.auth.tokens.old.archive</code>).</p>
+<p>Examples: <code>myproject.architecture</code>, <code>security.threat-intel.ioc-feeds</code>, <code>tasks.myproject</code></p>
+<h2 id="workflow-patterns">Workflow Patterns</h2>
+<p><strong>Session start:</strong> <code>hkb_session(action="briefing")</code> → scan open tasks → anchor relevant topics.</p>
+<p><strong>Deep dive:</strong> <code>hkb_context(topic="...", max_tokens=3000)</code> for packed context, then <code>hkb_session(action="anchor", topics="...")</code> to bias ongoing search.</p>
+<p><strong>Task tracking:</strong> <code>hkb_task(action="create", title="...", file="tasks.project")</code> → update status as work progresses → mark completed with note.</p>
+<p><strong>Superseding knowledge:</strong> Save new entry with updated info → <code>hkb_update(file="f", epoch=OLD, set_status="superseded")</code> on the outdated entry.</p>
+<p><strong>Maintenance:</strong> <code>hkb_health(checks="all", fix=True)</code> periodically. <code>hkb_health(action="compact", file="...", dry_run=True)</code> to preview merging old clustered entries.</p>
+<h2 id="lifecycle-progressions">Lifecycle Progressions</h2>
+<p><strong>Task:</strong> <code>pending</code> → <code>in_progress</code> → <code>blocked</code> → <code>in_progress</code> → <code>completed</code></p>
+<p><strong>Investigation:</strong> <code>finding(active)</code> → <code>decision</code> reached → original finding <code>superseded</code></p>
+<p><strong>Knowledge:</strong> <code>note(active)</code> → better info available → <code>superseded</code> → eventually <code>archive</code></p>
+<h2 id="multiple-clients-and-reliable-retries">Multiple clients and reliable retries</h2>
+<p>Each local MCP client launches its own <code>hkb-mcp</code> process against the same KB root. Shared storage writes are coordinated; session anchors remain process-local. Set a distinct <code>HKB_SOURCE</code> per client for provenance. Restart every client after upgrading.</p>
+<p>Read the returned epoch instead of predicting a timestamp. Inspect recent entries before retrying an append with a lost response; durable idempotency keys are not provided. Batch updates process at most 50 items and report <code>skipped</code> and <code>truncated</code>; task lists expose <code>has_more</code> and <code>next_offset</code>.</p>
+<p>Context budgets estimate the complete JSON response. They are not a model-specific tokenizer guarantee. Session anchors influence search and suggestions; packed context is returned without post-pack score mutations.</p>
+<p>Sync is optional. This release publishes manifest version 2; upgrade all clients using the same remote bucket/prefix before enabling it. See <a href="sync.html">sync</a> and <a href="operations.html">maintenance</a>.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#mental-model">Mental Model</a><a class="toc-level-2" href="#which-tool-do-i-use">Which Tool Do I Use?</a><a class="toc-level-3" href="#i-need-to-find-something">I need to FIND something</a><a class="toc-level-3" href="#i-need-to-save-something">I need to SAVE something</a><a class="toc-level-3" href="#i-need-to-update-something">I need to UPDATE something</a><a class="toc-level-3" href="#i-need-to-orient-myself">I need to ORIENT myself</a><a class="toc-level-3" href="#i-need-to-manage">I need to MANAGE</a><a class="toc-level-2" href="#handling-hkb_add-responses">Handling hkb_add Responses</a><a class="toc-level-2" href="#writing-good-entries">Writing Good Entries</a><a class="toc-level-3" href="#entry-metadata-format">Entry metadata format</a><a class="toc-level-3" href="#types-and-when-to-use-them">Types and when to use them</a><a class="toc-level-3" href="#type-skill-format">@type: skill format</a><a class="toc-level-3" href="#good-vs-bad-entries">Good vs. bad entries</a><a class="toc-level-3" href="#other-metadata">Other metadata</a><a class="toc-level-3" href="#content-constraints">Content constraints</a><a class="toc-level-2" href="#file-naming">File Naming</a><a class="toc-level-2" href="#workflow-patterns">Workflow Patterns</a><a class="toc-level-2" href="#lifecycle-progressions">Lifecycle Progressions</a><a class="toc-level-2" href="#multiple-clients-and-reliable-retries">Multiple clients and reliable retries</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

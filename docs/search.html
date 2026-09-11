@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Search &amp; context · HyperKB</title><meta name="description" content="Search modes, filters, ranking, and estimated budgets.">
+<link rel="canonical" href="https://hyperkb.com/docs/search.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html" aria-current="page">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Search &amp; context</h1><p class="doc-description">Search modes, filters, ranking, and estimated budgets.</p><div class="doc-source-links"><a href="SEARCH.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/SEARCH.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="search--context"></span>
+<p>HyperKB searches locally using ripgrep and SQLite FTS5/BM25. Entry search does not require an embedding model or an external API.</p>
+<h2 id="pick-a-search-mode">Pick a search mode</h2>
+<pre><code class="language-python">hkb_search(query=&quot;connection pool&quot;, domain=&quot;infra&quot;)
+hkb_search(query=&quot;postgres&quot;, mode=&quot;bm25&quot;)
+hkb_search(query=&quot;pool&quot;, mode=&quot;rg&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hybrid</code></td>
+<td>Combines ripgrep and BM25 candidates, deduplicates entries, then applies ranking signals</td>
+</tr>
+<tr>
+<td><code>rg</code></td>
+<td>Uses ripgrep text matching; a multiword query matches any of its words</td>
+</tr>
+<tr>
+<td><code>bm25</code></td>
+<td>Uses indexed keyword matching and stemming</td>
+</tr>
+<tr>
+<td><code>recent</code></td>
+<td>Returns a recent timeline rather than a keyword search</td>
+</tr>
+<tr>
+<td><code>check</code></td>
+<td>Suggests topic files for new content</td>
+</tr>
+</tbody>
+</table>
+<p>The public MCP interface does not expose a regex switch. Do not assume that <code>mode="rg"</code> interprets a phrase or a regular expression as a strict pattern.</p>
+<h2 id="filter-before-choosing-a-result">Filter before choosing a result</h2>
+<pre><code class="language-python">hkb_search(query=&quot;connection pool&quot;, domain=&quot;infra&quot;, type=&quot;decision&quot;,
+           status=&quot;active&quot;, author=&quot;editor-a&quot;, after=&quot;2w&quot;, top=10)
+</code></pre>
+<p>Status, type, author, and hostname filters apply across search sources. Domain scopes a dotted namespace. <code>include_archived=True</code> includes archive companions. Supported time inputs include epoch timestamps, durations such as <code>30m</code>, <code>4h</code>, <code>2d</code>, and <code>1w</code>, and ISO dates such as <code>2026-09-11</code>.</p>
+<p>Use <code>offset</code> and <code>top</code> for search pagination. The default result count is 10; the MCP interface bounds the requested page size. Results contain entry content, a snippet, file, epoch, provenance, and scoring metadata.</p>
+<h2 id="understand-ranking">Understand ranking</h2>
+<p>Text relevance is the starting point. Recency, entry type, status, importance, and session anchors influence ordering. A high score indicates relevance under those signals; it does not verify a fact or replace reading the original rationale.</p>
+<p>High-weight entries and decisions are exempt from the staleness penalty. Resolved or superseded entries can still be useful historical context, so they are dampened rather than automatically removed unless you filter them out.</p>
+<h2 id="pack-complete-context">Pack complete context</h2>
+<pre><code class="language-python">hkb_context(topic=&quot;postgres connection limits&quot;, max_tokens=3000)
+</code></pre>
+<p>The default <code>packed</code> mode retrieves candidate entries, ranks them for the topic, and includes complete entries that fit. Matching-line snippets are not substituted for full content. <code>depth="shallow"</code> requests the first 200 characters instead.</p>
+<p><code>tokens_used</code> is an estimate based on the complete JSON response, including metadata, file summaries, and truncation notices. It is not a count from a specific model tokenizer. The estimator is kept within <code>tokens_budget</code>; actual model token counts can differ, especially for code and non-English text. Very small budgets may not fit even the mandatory response metadata.</p>
+<p>Check <code>truncated</code> and the returned entries before assuming all relevant knowledge was included. Truncation notices themselves are bounded by the budget.</p>
+<h2 id="suggest-files-or-follow-a-story">Suggest files or follow a story</h2>
+<pre><code class="language-python">hkb_context(mode=&quot;suggest&quot;, topic=&quot;refactor authentication&quot;, top=5)
+hkb_context(mode=&quot;narrative&quot;, topic=&quot;database migration&quot;, depth=&quot;1&quot;)
+</code></pre>
+<p>Suggestions identify files to inspect. Narrative mode follows entry links for up to two hops and can order the results chronologically. A link's presence is not evidence that the linked claim is current.</p>
+<h2 id="keep-the-index-current">Keep the index current</h2>
+<p>Writes through HyperKB update the index. If you edit Markdown using another program, run <code>hkb reindex</code>. The index is rebuilt from a coordinated snapshot, and readers do not share its partial rebuild transaction. See <a href="operations.html">maintenance &amp; recovery</a>.</p></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#pick-a-search-mode">Pick a search mode</a><a class="toc-level-2" href="#filter-before-choosing-a-result">Filter before choosing a result</a><a class="toc-level-2" href="#understand-ranking">Understand ranking</a><a class="toc-level-2" href="#pack-complete-context">Pack complete context</a><a class="toc-level-2" href="#suggest-files-or-follow-a-story">Suggest files or follow a story</a><a class="toc-level-2" href="#keep-the-index-current">Keep the index current</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

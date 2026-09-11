@@ -1,0 +1,84 @@
+{
+  "name": "HyperKB",
+  "description": "Markdown knowledge for MCP clients, with local hybrid search and optional S3 synchronization.",
+  "website": "https://hyperkb.com",
+  "repository": "https://github.com/calvincs/hyperkb",
+  "license": "MIT",
+  "transport": "local stdio",
+  "instructions": "https://hyperkb.com/llm.txt",
+  "index": "https://hyperkb.com/llms.txt",
+  "documents": [
+    {
+      "title": "Project overview",
+      "description": "What HyperKB does and where to begin.",
+      "url": "https://hyperkb.com/docs/overview.html",
+      "source": "https://hyperkb.com/README.md"
+    },
+    {
+      "title": "Getting started",
+      "description": "Install, connect a client, and save your first entry.",
+      "url": "https://hyperkb.com/docs/getting-started.html",
+      "source": "https://hyperkb.com/docs/GETTING_STARTED.md"
+    },
+    {
+      "title": "How it works",
+      "description": "Topics, entries, links, and the storage model.",
+      "url": "https://hyperkb.com/docs/understanding.html",
+      "source": "https://hyperkb.com/docs/UNDERSTANDING.md"
+    },
+    {
+      "title": "MCP & clients",
+      "description": "Connect multiple clients and understand tool results.",
+      "url": "https://hyperkb.com/docs/mcp.html",
+      "source": "https://hyperkb.com/docs/MCP.md"
+    },
+    {
+      "title": "Everyday workflows",
+      "description": "Briefings, decisions, tasks, and focused context.",
+      "url": "https://hyperkb.com/docs/workflows.html",
+      "source": "https://hyperkb.com/docs/WORKFLOWS.md"
+    },
+    {
+      "title": "Search & context",
+      "description": "Search modes, filters, ranking, and estimated budgets.",
+      "url": "https://hyperkb.com/docs/search.html",
+      "source": "https://hyperkb.com/docs/SEARCH.md"
+    },
+    {
+      "title": "Sync between machines",
+      "description": "Set up a destination, upgrade safely, and resolve conflicts.",
+      "url": "https://hyperkb.com/docs/sync.html",
+      "source": "https://hyperkb.com/docs/SYNC.md"
+    },
+    {
+      "title": "Maintenance & recovery",
+      "description": "Diagnose, reindex, archive, and back up your knowledge.",
+      "url": "https://hyperkb.com/docs/operations.html",
+      "source": "https://hyperkb.com/docs/OPERATIONS.md"
+    },
+    {
+      "title": "Configuration",
+      "description": "Settings, optional capabilities, and credential handling.",
+      "url": "https://hyperkb.com/docs/configuration.html",
+      "source": "https://hyperkb.com/docs/CONFIGURATION.md"
+    },
+    {
+      "title": "Agent reference",
+      "description": "A practical reference for agents using the ten MCP tools.",
+      "url": "https://hyperkb.com/docs/agent-reference.html",
+      "source": "https://hyperkb.com/SKILL.md"
+    },
+    {
+      "title": "Changelog",
+      "description": "Current changes and historical releases.",
+      "url": "https://hyperkb.com/docs/changelog.html",
+      "source": "https://hyperkb.com/CHANGELOG.md"
+    },
+    {
+      "title": "MIT license",
+      "description": "The terms for using and contributing to HyperKB.",
+      "url": "https://hyperkb.com/license.html",
+      "source": "https://hyperkb.com/LICENSE"
+    }
+  ]
+}

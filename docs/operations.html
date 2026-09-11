@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Maintenance &amp; recovery · HyperKB</title><meta name="description" content="Diagnose, reindex, archive, and back up your knowledge.">
+<link rel="canonical" href="https://hyperkb.com/docs/operations.html"><link rel="icon" href="../mark.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b1115"><link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="../docs.css">
+<script src="../docs.js" defer></script></head><body class="docs-page">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap"><a class="brand" href="../index.html" aria-label="HyperKB home"><img src="../mark.svg" width="30" height="30" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><nav aria-label="Main navigation"><a href="index.html" aria-current="false">Documentation</a><a href="../llms.txt">For agents</a><a href="https://github.com/calvincs/hyperkb">GitHub ↗</a></nav></header>
+<div class="docs-layout wrap"><aside class="docs-sidebar"><a class="docs-home" href="index.html">DOCUMENTATION</a><label class="doc-search-label" for="doc-search">Find a guide</label><input id="doc-search" type="search" placeholder="Filter guides…" autocomplete="off" aria-controls="doc-nav" hidden><noscript><p class="docs-muted">Browse all guides below.</p></noscript><button class="doc-nav-toggle" type="button" aria-controls="doc-nav" aria-expanded="true" hidden>Browse guides</button><nav id="doc-nav" aria-label="Documentation navigation"><a href="overview.html">Project overview</a><a href="getting-started.html">Getting started</a><a href="understanding.html">How it works</a><a href="mcp.html">MCP &amp; clients</a><a href="workflows.html">Everyday workflows</a><a href="search.html">Search &amp; context</a><a href="sync.html">Sync between machines</a><a href="operations.html" aria-current="page">Maintenance &amp; recovery</a><a href="configuration.html">Configuration</a><a href="agent-reference.html">Agent reference</a><a href="changelog.html">Changelog</a><a href="../license.html">MIT license</a></nav><p id="search-status" class="docs-muted" role="status" aria-live="polite"></p><a class="machine-link" href="../agent.json">Machine-readable index ↗</a></aside>
+<main id="main" class="docs-main"><div class="doc-kicker">HYPERKB / DOCUMENTATION</div><h1>Maintenance &amp; recovery</h1><p class="doc-description">Diagnose, reindex, archive, and back up your knowledge.</p><div class="doc-source-links"><a href="OPERATIONS.md">Read Markdown ↗</a><a href="https://github.com/calvincs/hyperkb/blob/main/docs/OPERATIONS.md">View source ↗</a></div><article class="doc-prose"><span class="doc-title-anchor" id="maintenance--recovery"></span>
+<p>Your Markdown files are the primary knowledge store. SQLite is a rebuildable index. Keep independent backups of important knowledge even when sync is enabled.</p>
+<h2 id="check-health-without-mcp">Check health without MCP</h2>
+<pre><code class="language-bash">.venv/bin/hkb doctor
+.venv/bin/hkb doctor --path /absolute/path/to/knowledge-root
+</code></pre>
+<p><code>doctor</code> inspects SQLite and reports knowledge-base health. It does not repair or replace the index, run schema migrations, or checkpoint it. SQLite may create normal WAL reader bookkeeping files. Configuration and initialization problems are reported with recovery advice.</p>
+<p>Through MCP:</p>
+<pre><code class="language-python">hkb_health(checks=&quot;all&quot;)
+hkb_health(checks=&quot;all&quot;, fix=True)
+</code></pre>
+<p>Read the returned checks and fixes. A clean count-based check does not prove that every external file edit is reflected in the index.</p>
+<h2 id="rebuild-the-index">Rebuild the index</h2>
+<pre><code class="language-bash">.venv/bin/hkb reindex
+.venv/bin/hkb reindex --path /absolute/path/to/knowledge-root
+</code></pre>
+<p>Reindex reads Markdown and rebuilds entries, full-text search, metadata, and links from a coordinated snapshot. It does not reset your configuration. A corrupt index is preserved under a quarantine name for diagnosis before a replacement is built. The MCP server can also recover a missing index during startup.</p>
+<p>Use the offline command when MCP cannot start. If the Markdown itself is incomplete or corrupt, index rebuilding cannot invent the missing text: restore it from a backup or known history first.</p>
+<h2 id="back-up-safely">Back up safely</h2>
+<p>For a simple consistent backup, close the clients using this KB and wait for their processes to exit before copying the <code>.hkb</code> directory. Retain <code>storage</code>, configuration, and sync state. Treat saved configuration as potentially sensitive. Store the backup outside the live storage directory.</p>
+<p>For long-term content portability, the Markdown files are sufficient to reconstruct the searchable knowledge. Git history and synchronization baselines contain additional recovery state. Encrypted credentials are tied to the original machine; provision credentials separately on another machine.</p>
+<h2 id="move-or-restore-a-knowledge-base">Move or restore a knowledge base</h2>
+<p>Restore the <code>.hkb</code> directory underneath the intended root, update every client to use that root, and run <code>hkb doctor</code> followed by <code>hkb reindex</code> if needed. The configured root is resolved from the location you load, so an old absolute root in a copied configuration does not redirect storage to the previous directory.</p>
+<p>A new machine should have its own credentials and explicit sync setup. Read the <a href="sync.html#upgrade-existing-installations-first">sync migration rules</a> before connecting a restored copy to a shared bucket.</p>
+<h2 id="update-or-archive-an-entry">Update or archive an entry</h2>
+<pre><code class="language-python">hkb_update(file=&quot;infra.postgres&quot;, epoch=1789142400, set_status=&quot;superseded&quot;)
+hkb_update(action=&quot;archive&quot;, file=&quot;infra.postgres&quot;, epoch=1789142400)
+</code></pre>
+<p>Replace the illustrative epoch with the actual entry epoch. Archive publication preserves the destination copy before removing the source entry, and retries check for an existing equivalent archived entry. Provenance and link information are retained. Conflicting archive content is surfaced rather than overwritten.</p>
+<p>File replacement uses a temporary file and atomic rename. Multi-file operations preserve content on interruption, but this is not a general transaction spanning every filesystem, Git, and network operation.</p>
+<h2 id="group-old-prose-carefully">Group old prose carefully</h2>
+<pre><code class="language-python">hkb_health(action=&quot;compact&quot;, file=&quot;app.observations&quot;, dry_run=True)
+</code></pre>
+<p>Preview first. Compaction groups eligible old prose by time, concatenates it, and archives the originals. It is not an AI summary and does not promise fewer tokens. Tasks, decisions, and already-grouped entries are excluded to protect their meaning. Only run the non-dry-run operation when that grouping fits your workflow.</p>
+<h2 id="operational-boundaries">Operational boundaries</h2>
+<ul>
+<li>Use HyperKB APIs for coordinated mutations. An external editor does not acquire the storage lock; avoid editing the same file while clients are writing, then reindex.</li>
+<li>Shared local storage assumes filesystem locking and atomic replacement work correctly. Multi-machine use should go through sync rather than sharing an SQLite index over a network filesystem.</li>
+<li>A client cancellation is not proof that a write was undone. Check the entry before retrying.</li>
+<li>Entry epochs are identifiers within a file, not a full revision history. Optimistic revision checks and durable idempotency receipts are not part of this release.</li>
+<li>Synchronization and shutdown can wait for bounded file, Git, or network operations. Do not routinely terminate servers with <code>kill -9</code>.</li>
+</ul></article><footer class="doc-end"><a href="index.html">← All guides</a><a href="https://github.com/calvincs/hyperkb/issues">Suggest an improvement ↗</a></footer></main>
+<aside class="docs-toc" aria-label="On this page"><span>ON THIS PAGE</span><a class="toc-level-2" href="#check-health-without-mcp">Check health without MCP</a><a class="toc-level-2" href="#rebuild-the-index">Rebuild the index</a><a class="toc-level-2" href="#back-up-safely">Back up safely</a><a class="toc-level-2" href="#move-or-restore-a-knowledge-base">Move or restore a knowledge base</a><a class="toc-level-2" href="#update-or-archive-an-entry">Update or archive an entry</a><a class="toc-level-2" href="#group-old-prose-carefully">Group old prose carefully</a><a class="toc-level-2" href="#operational-boundaries">Operational boundaries</a></aside></div>
+<footer class="site-footer wrap"><p>Knowledge that stays with you.</p><nav aria-label="Footer navigation"><a href="../index.html">Home</a><a href="../license.html">MIT license</a><a href="../llms.txt">llms.txt</a></nav></footer></body></html>

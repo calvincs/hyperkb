@@ -1,237 +1,37 @@
-# hyperkb
+# HyperKB
 
-> Persistent memory for AI agents. Flat markdown files, SQLite indexing, ripgrep speed. MCP-native.
+> Persistent Markdown memory for MCP clients. Local ripgrep + BM25 search,
+> complete context retrieval, and optional Git-backed S3 synchronization.
 
-## What It Is
+HyperKB is MIT-licensed Python software. Knowledge lives in topic-named Markdown
+files; SQLite is a rebuildable index. Multiple local stdio clients share storage
+with coordinated mutations and independent session context. There is no public
+HTTP MCP endpoint in this project.
 
-hyperkb is a knowledge base where markdown files are the source of truth and SQLite is a rebuildable index. Entries are append-only with epoch timestamps. Files use dotted namespaces (`domain.topic.subtopic.md`) instead of folders. All knowledge operations run through 10 MCP tools; the CLI handles only admin (`hkb init`, `hkb config`, `hkb sync`).
+## Start here
 
-Storage lives at `~/.hkb/` by default. Delete the SQLite index and rebuild it in seconds with `hkb_health(action="reindex")`.
+- [Short agent guide](llm.txt)
+- [Getting started](docs/GETTING_STARTED.md)
+- [How it works](docs/UNDERSTANDING.md)
+- [MCP & clients](docs/MCP.md)
+- [Agent reference](SKILL.md)
 
-## Why hyperkb
+## Work with knowledge
 
-- Human-readable storage: files named `infra.postgres.md`, not hashed blobs. Read without the tool, in any editor, forever.
-- Search that ranks: 9-stage scoring with recency decay, staleness penalties, type/status boosts, session anchoring.
-- No database lock-in: SQLite is a rebuildable index. Delete and rebuild in seconds.
-- Context-aware retrieval: token-budgeted packing, session briefings, topic anchoring.
-- Real multi-machine sync: git-backed three-way merge over S3 with encrypted credentials and conflict resolution.
+- [Everyday workflows](docs/WORKFLOWS.md)
+- [Search & context](docs/SEARCH.md)
+- [Sync and migration](docs/SYNC.md)
+- [Maintenance & recovery](docs/OPERATIONS.md)
+- [Configuration](docs/CONFIGURATION.md)
 
-## Key Files
+## Project
 
-- [README.md](https://github.com/calvincs/hyperkb/blob/main/README.md) — Full documentation
-- [SKILL.md](https://github.com/calvincs/hyperkb/blob/main/SKILL.md) — MCP tool decision guide (when/how to use each tool)
-- [LICENSE](https://github.com/calvincs/hyperkb/blob/main/LICENSE) — Custom license (MIT-based with restrictions)
-- [CONTRIBUTING.md](https://github.com/calvincs/hyperkb/blob/main/CONTRIBUTING.md) — CLA and contribution process
-- [CLAUDE.md](https://github.com/calvincs/hyperkb/blob/main/CLAUDE.md) — Development instructions
-- [pyproject.toml](https://github.com/calvincs/hyperkb/blob/main/pyproject.toml) — Package config and dependencies
-- [.claude/skills/rem/SKILL.md](https://github.com/calvincs/hyperkb/blob/main/.claude/skills/rem/SKILL.md) — `/rem` natural language save/recall skill
-- [integrations/opencode/](https://github.com/calvincs/hyperkb/tree/main/integrations/opencode) — OpenCode integration files
+- [Source](https://github.com/calvincs/hyperkb)
+- [Readable documentation](docs/index.html)
+- [License](LICENSE)
+- [Changelog](https://github.com/calvincs/hyperkb/blob/main/CHANGELOG.md)
 
-## Requirements
-
-- Python 3.10+
-- [ripgrep](https://github.com/BurntSushi/ripgrep#installation) (`rg`) on PATH
-
-## Install
-
-```bash
-# macOS
-brew install ripgrep
-# Linux
-sudo apt install ripgrep
-
-git clone https://github.com/calvincs/hyperkb ~/src/hyperkb
-python3 -m venv ~/.hkb/venv
-~/.hkb/venv/bin/pip install -e "~/src/hyperkb[all]"
-export PATH="$HOME/.hkb/venv/bin:$PATH"  # add to shell rc
-hkb init
-```
-
-### Optional extras
-
-```bash
-pip install -e ".[all]"      # crypto + mcp + sync
-pip install -e ".[crypto]"   # Fernet key encryption
-pip install -e ".[mcp]"      # MCP server
-pip install -e ".[sync]"     # S3 sync + watchdog
-pip install -e ".[dev]"      # pytest + moto
-```
-
-## Configure MCP Server
-
-Register in `.mcp.json` (project or `~/.claude/.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "hyperkb": {
-      "command": "~/.hkb/venv/bin/hkb-mcp"
-    }
-  }
-}
-```
-
-Auto-approve tools in `.claude/settings.local.json`:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__hyperkb__hkb_search", "mcp__hyperkb__hkb_show",
-      "mcp__hyperkb__hkb_add", "mcp__hyperkb__hkb_update",
-      "mcp__hyperkb__hkb_task", "mcp__hyperkb__hkb_sync",
-      "mcp__hyperkb__hkb_session", "mcp__hyperkb__hkb_context",
-      "mcp__hyperkb__hkb_view", "mcp__hyperkb__hkb_health"
-    ]
-  }
-}
-```
-
-Restart the MCP client and approve the server when prompted.
-
-## Architecture
-
-```
-.md files (source of truth)
-    |
-    +-- ripgrep ----------> exact/regex matches (fastest)
-    |
-    +-- SQLite index
-         +-- FTS5 --------> BM25 keyword ranking
-```
-
-Data flow: `mcp_server.py` -> `store.py` -> `db.py` + `search.py` + `format.py`.
-
-## File Format
-
-Files use dotted namespace names: `domain.topic[.subtopic[.focus]].md` (2-4 segments, lowercase, hyphens within segments). YAML frontmatter describes the file; timestamped entries are delimited by `>>> epoch` / `<<<` markers.
-
-```markdown
----
-name: infra.postgres
-description: PostgreSQL configuration, performance findings, connection pooling.
-keywords: [postgres, connection-pool, database]
-links: [infra.redis]
-created: 2026-02-21T10:00:00Z
-compacted: ""
----
-
->>> 1740130800
-@type: finding
-@weight: high
-Connection pool exhaustion under 50+ concurrent requests.
-Root cause: default pool size of 10 with no timeout on checkout.
-<<<
-```
-
-## Entry Metadata
-
-`@key: value` lines at the start of entry content are parsed into DB columns.
-
-- `@type`: note (default), finding, decision, task, milestone, skill
-- `@status`: active (default), pending, in_progress, blocked, completed, superseded, resolved, cancelled, archived
-- `@weight`: high (stays prominent), normal (default), low (temporary)
-- `@tags`: comma-separated labels
-- `@author` / `@hostname`: auto-populated, never set manually
-
-## 10 MCP Tools
-
-| Tool | Purpose |
-|------|---------|
-| `hkb_search` | Find entries. Modes: hybrid, rg, bm25, recent, check |
-| `hkb_show` | Read files, list files, link graph |
-| `hkb_add` | Add entry or create file |
-| `hkb_update` | Amend, archive, batch update entries |
-| `hkb_task` | Task lifecycle: create, show, update, list |
-| `hkb_sync` | S3 sync: push, pull, both, status, config, conflicts |
-| `hkb_session` | Briefing, review, anchor (session management) |
-| `hkb_context` | Token-budgeted retrieval: packed, suggest, narrative |
-| `hkb_view` | Named file groupings: set, list |
-| `hkb_health` | Maintenance: check, reindex, compact |
-
-### Tool Selection Guide
-
-**Find something:**
-- Know the file -> `hkb_show(name="file.name")`
-- Don't know the file -> `hkb_search(query="keywords")`
-- Exact string/regex -> `hkb_search(mode="rg", query="...")`
-- List all files -> `hkb_show()`
-- Recent timeline -> `hkb_search(mode="recent")`
-- Token-budgeted context -> `hkb_context(topic="...")`
-- File suggestions -> `hkb_context(mode="suggest", topic="...")`
-
-**Save something:**
-- Know the file -> `hkb_add(content="...", to="file.name")`
-- Unsure where -> `hkb_search(mode="check", query="...")` then add with `to=`
-- New file needed -> `hkb_add(create_file=True, to="name", description="...", keywords=[...])`
-
-**Update something:**
-- Amend -> `hkb_update(file="f", epoch=E, new_content="...")`
-- Archive -> `hkb_update(action="archive", file="f", epoch=E)`
-- Supersede -> add new entry, then `hkb_update(file="f", epoch=OLD, set_status="superseded")`
-
-**Orient yourself:**
-- Session start -> `hkb_session(action="briefing")`
-- Focused briefing -> `hkb_session(action="briefing", focus="topic")`
-- Set search bias -> `hkb_session(action="anchor", topics="auth, security")` (1.5x boost)
-
-### hkb_add Response Handling
-
-| Response | Meaning | Action |
-|----------|---------|--------|
-| `"ok"` | Saved | Done |
-| `"no_match"` | No file matched | Create file first, then retry with `to=` |
-| `"low_confidence"` | Weak matches listed | Pick one and retry with `to=`, or create new file |
-
-Never re-call `hkb_add` without `to=` — auto-routing returns the same result.
-
-## Search Scoring Pipeline
-
-1. Source weighting: rg (0.5) + BM25 (0.5)
-2. Deduplication across sources
-3. Recency boost: 80% relevance + 20% recency (180-day half-life)
-4. Staleness penalty: active entries older than 360 days dampened (floor 0.7). Decisions and high-weight exempt.
-5. Type boost: decision 1.1x, skill 1.08x, finding 1.05x, milestone 1.05x
-6. Status boost: pending 1.08x, in_progress 1.05x, completed 0.88x, cancelled 0.65x
-7. Weight boost: high 1.15x, normal 1.0x, low 0.8x
-8. Anchor boost: 1.5x for files matching session anchors
-
-## Multi-Machine Sync
-
-S3-compatible sync with git-backed three-way merge. Works with AWS S3, MinIO, Backblaze B2.
-
-```bash
-hkb sync setup              # interactive wizard
-hkb_sync(action="both")     # push + pull via MCP
-hkb_sync(action="status")   # check sync state
-```
-
-Credentials encrypted at rest with machine-tied Fernet. Background sync polls every 60 seconds (configurable). Watchdog triggers sync on local file changes.
-
-## Config Keys
-
-| Key | Default | Purpose |
-|-----|---------|---------|
-| `rg_weight` | 0.5 | Ripgrep weight in hybrid search |
-| `bm25_weight` | 0.5 | BM25 weight in hybrid search |
-| `recency_half_life_days` | 180 | Recency decay half-life |
-| `route_confidence_threshold` | 0.6 | Auto-routing minimum score |
-| `max_entry_size` | 1048576 | Max entry size (bytes) |
-| `rg_timeout` | 10.0 | Ripgrep timeout (seconds) |
-| `sync_enabled` | false | Enable S3 sync |
-| `sync_interval` | 60 | Background sync interval (seconds) |
-
-## Admin CLI
-
-```bash
-hkb init [--path DIR]          # initialize KB
-hkb config KEY [VALUE] [--set] # view/set config
-hkb sync setup                 # interactive S3 setup
-hkb sync status                # quick sync check
-```
-
-## License
-
-Custom license (MIT-based with anti-exploitation protections). Free for individuals, students, hobbyists, small teams, nonprofits, universities. Restricted entities (AI companies, California-based companies, competitors, companies with recent mass layoffs, large commercial entities) must obtain written permission. AI training on this code requires permission.
-
-Contact: Open an issue on GitHub, or email contact -at- hyperkb -dot- com.
+Local search needs no model API key. Context token counts are estimates, not a
+specific model tokenizer's count. Entries can be amended, so storage is not an
+immutable audit log. Upgrade every client sharing a bucket before publishing a
+version 2 sync manifest; old clients do not understand immutable blob references.
