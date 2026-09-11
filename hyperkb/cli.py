@@ -464,8 +464,9 @@ def update_apply():
     click.echo("Restart your connected MCP clients to load the updated version.")
 
     # Step 8: Log the update
-    new_tag = _get_local_tag(repo) or new_head[:8]
-    msg = f"Installed {new_tag} at {new_head[:8]} (previous package {installed_version})"
+    # The nearest release tag may predate this source revision. Report the
+    # installed commit rather than labeling an untagged update as an old release.
+    msg = f"Installed source at {new_head[:8]} (previous package {installed_version})"
     _log_update(msg)
     click.echo(f"\nDone. {msg}")
 
