@@ -10,7 +10,6 @@ import os
 import re
 import socket
 import sqlite3
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,12 +18,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from .config import KBConfig
-from .db import KBDatabase, TimeoutLock
+from .db import KBDatabase
+from .locking import storage_lock
 from .format import (
     FileHeader, Entry, parse_file, create_file_content,
     append_entry_to_file, make_epoch, validate_filename, extract_wikilinks,
     safe_parse_json_list, extract_metadata, render_metadata, is_archive_file,
-    VALID_STATUS, VALID_WEIGHT,
+    VALID_STATUS, VALID_WEIGHT, atomic_write_text, normalize_filename,
 )
 from .models import SearchResult, FileCandidate
 from .search import HybridSearch
@@ -55,7 +55,7 @@ class KnowledgeStore:
         self.root = Path(config.root)
         self.db = KBDatabase(config)
         self._search: Optional[HybridSearch] = None
-        self._write_lock = TimeoutLock(timeout=60, name="store-write")
+        self._write_lock = storage_lock(self.storage_dir)
         self._git = None  # Lazy-init GitRepo for sync
 
     def _sync_commit(self, files: list[str], message: str) -> None:
@@ -91,13 +91,56 @@ class KnowledgeStore:
 
     def init(self) -> str:
         """Initialize a new knowledge base."""
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.config.root = str(self.root)
-        self.config.save()
-        self.db.connect()
-        self.db.init_schema()
-        return f"Knowledge base initialized at {self.root}"
+        with self._write_lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+            self.config.root = str(self.root)
+            if not self.config.config_path.exists():
+                self.config.save()
+            self.recover_index()
+            return f"Knowledge base initialized at {self.root}"
+
+    def recover_index(self) -> str:
+        """Recover the disposable SQLite index from markdown, preserving corrupt evidence."""
+        with self._write_lock, self.db._lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+            rebuild = False
+            try:
+                conn = self.db.connect()
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                rebuild = not {"files", "entries", "entries_fts", "files_fts"}.issubset(tables)
+                if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise sqlite3.DatabaseError("Index integrity check failed")
+            except sqlite3.DatabaseError as exc:
+                # Operational failures (locks, permissions, full disk) are not corruption.
+                code = getattr(exc, "sqlite_errorcode", None)
+                if code is not None and (code & 255) not in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                    raise
+                if self.db.conn is not None:
+                    self.db.conn.close()
+                    self.db.conn = None
+                stamp = f".corrupt-{time.time_ns()}"
+                for suffix in ("", "-wal", "-shm"):
+                    path = Path(str(self.db.db_path) + suffix)
+                    if path.exists():
+                        path.rename(Path(str(self.db.db_path) + stamp + suffix))
+                rebuild = True
+            self.db.init_schema()
+            if not rebuild:
+                disk = {}
+                for filepath in self.storage_dir.glob("*.md"):
+                    self._file_path(filepath.stem)
+                    _, entries = parse_file(filepath)
+                    disk[filepath.stem] = {(e.epoch, e.content, e.metadata.get("status", "active"),
+                                           e.metadata.get("type", "note"), e.metadata.get("tags", ""),
+                                           e.metadata.get("weight", "normal"), e.metadata.get("author", ""),
+                                           e.metadata.get("hostname", "")) for e in entries}
+                indexed = {f["name"]: {(e["epoch"], e["content"], e["status"], e["entry_type"], e["tags"],
+                                        e["weight"], e["author"], e["hostname"]) for e in self.db.get_entries(f["name"])}
+                           for f in self.db.list_files()}
+                rebuild = disk != indexed
+            return self.reindex() if rebuild else ""
 
     def close(self):
         self.db.close()
@@ -126,6 +169,7 @@ class KnowledgeStore:
         Raises:
             ValueError: If filename is invalid or already exists.
         """
+        name = normalize_filename(name)
         # Validate filename
         valid, err = validate_filename(name)
         if not valid:
@@ -133,7 +177,7 @@ class KnowledgeStore:
 
         with self._write_lock:
             # Check for duplicates
-            if self.db.file_exists(name):
+            if self.db.file_exists(name) or self._file_path(name).exists():
                 raise ValueError(
                     f"File '{name}' already exists. Use 'hkb check \"{description}\"' "
                     f"to find the right file, or choose a different name."
@@ -164,8 +208,8 @@ class KnowledgeStore:
             )
 
             # Create the file
-            filepath = self.storage_dir / f"{name}.md"
-            filepath.write_text(create_file_content(header), encoding="utf-8")
+            filepath = self._file_path(name)
+            atomic_write_text(filepath, create_file_content(header), encoding="utf-8")
 
             # Insert into database
             self.db.insert_file(header, str(filepath.relative_to(self.storage_dir)))
@@ -177,27 +221,14 @@ class KnowledgeStore:
             self._sync_commit([f"{name}.md"], f"create file {name}")
             return msg
 
-    def add_entry(
-        self,
-        content: str,
-        file_name: Optional[str] = None,
-        epoch: Optional[int] = None,
-    ) -> str:
-        """Add an entry to a knowledge file.
+    def _file_path(self, name: str) -> Path:
+        name = normalize_filename(name)
+        path = self.storage_dir / f"{name}.md"
+        if path.is_symlink() or path.resolve().parent != self.storage_dir.resolve():
+            raise ValueError("Knowledge files must be regular files inside storage")
+        return path
 
-        Args:
-            content: The knowledge to store. Should be self-contained and
-                     meaningful on its own. Include context: what, when, why.
-                     Use [[file.name]] or [[file.name#epoch]] for cross-references.
-            file_name: Target file. If omitted, the system will find the best
-                       match or suggest creating a new file.
-            epoch: Override timestamp (default: now).
-
-        Returns:
-            Confirmation with file name and epoch, or suggestion to create a new file.
-        """
-        epoch = epoch or make_epoch()
-
+    def _validate_content(self, content: str) -> str:
         # Reject empty/whitespace-only content
         content = content.strip()
         if not content:
@@ -221,10 +252,34 @@ class KnowledgeStore:
                 f"{limit_mb:.2f} MiB limit. Split into smaller entries."
             )
 
+        return content
+
+    def add_entry(
+        self,
+        content: str,
+        file_name: Optional[str] = None,
+        epoch: Optional[int] = None,
+    ) -> str:
+        """Add an entry to a knowledge file.
+
+        Args:
+            content: The knowledge to store. Should be self-contained and
+                     meaningful on its own. Include context: what, when, why.
+                     Use [[file.name]] or [[file.name#epoch]] for cross-references.
+            file_name: Target file. If omitted, the system will find the best
+                       match or suggest creating a new file.
+            epoch: Override timestamp (default: now).
+
+        Returns:
+            Confirmation with file name and epoch, or suggestion to create a new file.
+        """
+        epoch = epoch or make_epoch()
+
+        content = self._validate_content(content)
+
         if file_name:
             # Direct routing
-            if file_name.endswith(".md"):
-                file_name = file_name[:-3]
+            file_name = normalize_filename(file_name)
 
             if not self.db.file_exists(file_name):
                 raise ValueError(
@@ -294,7 +349,7 @@ class KnowledgeStore:
         db_hostname = metadata.get("hostname", "")
 
         with self._write_lock:
-            filepath = self.storage_dir / f"{file_name}.md"
+            filepath = self._file_path(file_name)
 
             # Insert to DB first (handles epoch collision by incrementing)
             # Store prose content in DB (metadata lives in columns)
@@ -358,8 +413,7 @@ class KnowledgeStore:
         if not any([new_content, set_status, add_tags, remove_tags]):
             raise ValueError("At least one of new_content, set_status, add_tags, or remove_tags must be provided.")
 
-        if file_name.endswith(".md"):
-            file_name = file_name[:-3]
+        file_name = normalize_filename(file_name)
 
         with self._write_lock:
             # Verify entry exists in DB
@@ -367,7 +421,7 @@ class KnowledgeStore:
             if db_entry is None:
                 raise ValueError(f"Entry not found: {file_name} at epoch {epoch}")
 
-            filepath = self.storage_dir / f"{file_name}.md"
+            filepath = self._file_path(file_name)
             if not filepath.exists():
                 raise ValueError(f"File '{file_name}' not found on disk.")
 
@@ -385,10 +439,7 @@ class KnowledgeStore:
 
             # Apply content update
             if new_content is not None:
-                new_content = new_content.strip()
-                if not new_content:
-                    raise ValueError("new_content cannot be empty.")
-                target.content = new_content
+                target.content = self._validate_content(new_content)
 
             # Apply metadata updates
             meta = dict(target.metadata)
@@ -414,7 +465,7 @@ class KnowledgeStore:
 
             # Rewrite the file
             entries[target_idx] = target
-            filepath.write_text(create_file_content(header, entries), encoding="utf-8")
+            atomic_write_text(filepath, create_file_content(header, entries), encoding="utf-8")
 
             # Validate weight if present
             if "weight" in meta and meta["weight"] not in VALID_WEIGHT:
@@ -454,14 +505,13 @@ class KnowledgeStore:
         Returns dict with status and archive file name.
         Raises ValueError if entry/file not found.
         """
-        if file_name.endswith(".md"):
-            file_name = file_name[:-3]
+        file_name = normalize_filename(file_name)
 
         archive_name = f"{file_name}.archive"
 
         with self._write_lock:
             # Parse source file
-            filepath = self.storage_dir / f"{file_name}.md"
+            filepath = self._file_path(file_name)
             if not filepath.exists():
                 raise ValueError(f"File '{file_name}' not found.")
 
@@ -475,48 +525,49 @@ class KnowledgeStore:
                 raise ValueError(f"Entry at epoch {epoch} not found in file '{file_name}'.")
 
             target = entries.pop(target_idx)
+            target.metadata["archived-from"] = f"{file_name}#{epoch}"
             target.metadata["status"] = "archived"
-
-            # Create archive file if it doesn't exist
-            archive_path = self.storage_dir / f"{archive_name}.md"
-            if not archive_path.exists():
-                now = datetime.now(timezone.utc).isoformat()
-                archive_header = FileHeader(
-                    name=archive_name,
-                    description=f"Archived entries from {file_name}",
-                    keywords=header.keywords,
-                    links=[file_name],
-                    created=now,
-                )
-                archive_path.write_text(
-                    create_file_content(archive_header), encoding="utf-8"
-                )
-                self.db.insert_file(
-                    archive_header,
-                    str(archive_path.relative_to(self.storage_dir)),
-                )
-
-            # Append entry to archive file
             target.file_name = archive_name
-            append_entry_to_file(archive_path, target)
-
-            # Rewrite source file without the archived entry
-            filepath.write_text(create_file_content(header, entries), encoding="utf-8")
-
-            # Update DB: delete from source, insert into archive
-            self.db.delete_entry_by_epoch(file_name, epoch)
-            self.db.insert_entry(
-                archive_name, epoch, target.content,
-                status="archived",
-                entry_type=target.metadata.get("type", "note"),
-                tags=target.metadata.get("tags", ""),
-            )
+            self._publish_archive(file_name, header, [target])
+            atomic_write_text(filepath, create_file_content(header, entries))
+            self.reindex()
 
             self._sync_commit(
                 [f"{file_name}.md", f"{archive_name}.md"],
                 f"archive entry from {file_name} at {epoch}",
             )
             return {"status": "ok", "archived_to": archive_name, "epoch": epoch}
+
+    def _publish_archive(self, source: str, header: FileHeader, entries: list[Entry]) -> int:
+        """Publish originals before removing them; retries deduplicate identical copies.
+
+        A crash between the two renames can leave duplicates, never lost originals.
+        Conflicting historical epochs require manual reconciliation before removal.
+        """
+        name = f"{source}.archive"
+        path = self._file_path(name)
+        if path.exists():
+            archive_header, archived = parse_file(path)
+        else:
+            archive_header = FileHeader(name=name, description=f"Archived entries from {source}",
+                                        keywords=header.keywords, links=[source],
+                                        created=datetime.now(timezone.utc).isoformat())
+            archived = []
+        existing = {e.epoch: e for e in archived}
+        added = 0
+        for entry in entries:
+            old = existing.get(entry.epoch)
+            if old:
+                comparable_old = {k: v for k, v in old.metadata.items() if k != "archived-from"}
+                comparable_new = {k: v for k, v in entry.metadata.items() if k != "archived-from"}
+                if old.content != entry.content or comparable_old != comparable_new:
+                    raise ValueError(f"Archive epoch collision in {name}: {entry.epoch}; originals preserved")
+            else:
+                archived.append(entry)
+                existing[entry.epoch] = entry
+                added += 1
+        atomic_write_text(path, create_file_content(archive_header, archived))
+        return added
 
     @staticmethod
     def _cluster_entries(
@@ -534,6 +585,8 @@ class KnowledgeStore:
         compactable = [
             e for e in entries
             if e.metadata.get("status", "active") not in SKIP_STATUS
+            and e.metadata.get("type", "note") not in {"task", "decision"}
+            and e.metadata.get("compacted") != "true"
         ]
         compactable.sort(key=lambda e: e.epoch)
 
@@ -584,7 +637,7 @@ class KnowledgeStore:
         """Compact a file by clustering temporally-related entries.
 
         Identifies clusters of entries written close together in time,
-        replaces each cluster with a single concatenated summary entry,
+        replaces each cluster with a single concatenated grouping entry,
         and archives the originals to the .archive companion file.
 
         Args:
@@ -597,13 +650,12 @@ class KnowledgeStore:
         Returns:
             Dict with status and compaction details.
         """
-        if file_name.endswith(".md"):
-            file_name = file_name[:-3]
+        file_name = normalize_filename(file_name)
 
         if is_archive_file(file_name):
             raise ValueError(f"Cannot compact archive file '{file_name}'.")
 
-        filepath = self.storage_dir / f"{file_name}.md"
+        filepath = self._file_path(file_name)
         if not filepath.exists():
             raise FileNotFoundError(f"File '{file_name}' not found.")
 
@@ -692,7 +744,7 @@ class KnowledgeStore:
                         if t:
                             all_tags.add(t)
 
-                summary_meta: dict[str, str] = {"type": "note"}
+                summary_meta: dict[str, str] = {"type": "note", "compacted": "true"}
                 if all_tags:
                     summary_meta["tags"] = ", ".join(sorted(all_tags))
 
@@ -709,7 +761,7 @@ class KnowledgeStore:
                         epoch=e.epoch,
                         content=e.content,
                         file_name=f"{file_name}.archive",
-                        metadata={**e.metadata, "status": "archived"},
+                        metadata={**e.metadata, "status": "archived", "archived-from": f"{file_name}#{e.epoch}"},
                     ))
 
             # Build new source file entries: replace clusters with summaries
@@ -724,65 +776,10 @@ class KnowledgeStore:
                     continue
                 new_entries.append(e)
 
-            # Ensure archive file exists
-            archive_name = f"{file_name}.archive"
-            archive_path = self.storage_dir / f"{archive_name}.md"
-            if not archive_path.exists():
-                now_iso = datetime.now(timezone.utc).isoformat()
-                archive_header = FileHeader(
-                    name=archive_name,
-                    description=f"Archived entries from {file_name}",
-                    keywords=header.keywords,
-                    links=[file_name],
-                    created=now_iso,
-                )
-                archive_path.write_text(
-                    create_file_content(archive_header), encoding="utf-8"
-                )
-                self.db.insert_file(
-                    archive_header,
-                    str(archive_path.relative_to(self.storage_dir)),
-                )
-
-            # Before bulk-append, collect existing archive epochs for dedup
-            existing_archive_epochs: set[int] = set()
-            if archive_path.exists():
-                _, existing_arch_entries = parse_file(archive_path)
-                existing_archive_epochs = {e.epoch for e in existing_arch_entries}
-
-            # Bulk-append archived entries, skipping duplicates
-            actually_archived = 0
-            for ae in archive_entries:
-                if ae.epoch not in existing_archive_epochs:
-                    append_entry_to_file(archive_path, ae)
-                    actually_archived += 1
-
-            # Update header and rewrite source file
+            actually_archived = self._publish_archive(file_name, header, archive_entries)
             header.compacted = datetime.now(timezone.utc).isoformat()
-            filepath.write_text(
-                create_file_content(header, new_entries), encoding="utf-8"
-            )
-
-            # Update DB: remove originals, add archived + summaries
-            for epoch in epochs_to_archive:
-                self.db.delete_entry_by_epoch(file_name, epoch)
-
-            for ae in archive_entries:
-                if ae.epoch not in existing_archive_epochs:
-                    self.db.insert_entry(
-                        archive_name, ae.epoch, ae.content,
-                        status="archived",
-                        entry_type=ae.metadata.get("type", "note"),
-                        tags=ae.metadata.get("tags", ""),
-                    )
-
-            for se in summary_entries:
-                self.db.insert_entry(
-                    file_name, se.epoch, se.content,
-                    status="active",
-                    entry_type=se.metadata.get("type", "note"),
-                    tags=se.metadata.get("tags", ""),
-                )
+            atomic_write_text(filepath, create_file_content(header, new_entries))
+            self.reindex()
 
             self._sync_commit(
                 [f"{file_name}.md", f"{file_name}.archive.md"],
@@ -907,10 +904,9 @@ class KnowledgeStore:
         Returns:
             Dict with 'header' and 'entries' keys.
         """
-        if name.endswith(".md"):
-            name = name[:-3]
+        name = normalize_filename(name)
 
-        filepath = self.storage_dir / f"{name}.md"
+        filepath = self._file_path(name)
         if not filepath.exists():
             raise FileNotFoundError(f"File '{name}' not found.")
 
@@ -925,7 +921,7 @@ class KnowledgeStore:
 
         return {
             "header": header.to_dict(),
-            "entries": [{"epoch": e.epoch, "content": e.content} for e in entries],
+            "entries": [{"epoch": e.epoch, "content": e.content, "metadata": dict(e.metadata)} for e in entries],
         }
 
     def list_files(self, domain: Optional[str] = None) -> list[dict]:
@@ -945,8 +941,7 @@ class KnowledgeStore:
         Shows outbound links (from header), inbound links (from other files'
         headers), and inbound entry links (wiki-links in other files' entries).
         """
-        if name.endswith(".md"):
-            name = name[:-3]
+        name = normalize_filename(name)
         return self.db.get_links_for_file(name)
 
     def get_entry_links(self, file_name: str, epoch: int) -> dict:
@@ -955,8 +950,7 @@ class KnowledgeStore:
         Returns outbound references and inbound backlinks from the
         computed entry_links table (populated during reindex).
         """
-        if file_name.endswith(".md"):
-            file_name = file_name[:-3]
+        file_name = normalize_filename(file_name)
         outbound = self.db.get_entry_references(file_name, epoch)
         inbound = self.db.get_entry_backlinks(file_name, epoch)
         return {"outbound": outbound, "inbound": inbound}
@@ -1016,65 +1010,49 @@ class KnowledgeStore:
             r.score *= self._type_priority(r.entry_type, r.status)
         results.sort(key=lambda r: r.score, reverse=True)
 
-        # Reserve tokens for file summaries
-        summary_reserve = 200
-        entry_budget = max_tokens - summary_reserve
+        if depth not in {"deep", "shallow"}:
+            raise ValueError("depth must be deep or shallow")
+        response = {
+            "topic": topic, "tokens_used": 0, "tokens_budget": max_tokens,
+            "depth": depth, "entries": [], "truncated": [], "file_summaries": [],
+        }
 
-        entries_out = []
-        truncated = []
-        tokens_used = 0
+        def measure():
+            # Include JSON structure and the estimate's own digits. This is an
+            # estimate, not a guarantee for a particular model tokenizer.
+            for _ in range(4):
+                response["tokens_used"] = self._estimate_tokens(json.dumps(response, indent=2))
+            return response["tokens_used"]
+
+        if measure() > max_tokens:
+            raise ValueError("Token budget is too small for the response metadata")
         files_seen = set()
-
         for r in results:
-            content = r.content
-            if depth == "shallow":
-                content = content[:200]
-
-            entry_tokens = self._estimate_tokens(content)
-            if tokens_used + entry_tokens > entry_budget:
-                truncated.append({
-                    "file_name": r.file_name,
-                    "epoch": r.epoch,
-                    "score": round(r.score, 4),
-                    "tokens": entry_tokens,
-                })
+            entry = {
+                "file_name": r.file_name, "epoch": r.epoch,
+                "content": r.content[:200] if depth == "shallow" else r.content,
+                "score": round(r.score, 4), "type": r.entry_type,
+                "status": r.status, "weight": r.weight,
+            }
+            response["entries"].append(entry)
+            if measure() > max_tokens:
+                response["entries"].pop()
+                notice = {"file_name": r.file_name, "epoch": r.epoch,
+                          "score": round(r.score, 4), "tokens": self._estimate_tokens(entry["content"])}
+                response["truncated"].append(notice)
+                if measure() > max_tokens:
+                    response["truncated"].pop()
                 continue
-
-            entries_out.append({
-                "file_name": r.file_name,
-                "epoch": r.epoch,
-                "content": content,
-                "score": round(r.score, 4),
-                "type": r.entry_type,
-                "status": r.status,
-                "weight": r.weight,
-            })
-            tokens_used += entry_tokens
             files_seen.add(r.file_name)
 
-        # File summaries for referenced files
-        file_summaries = []
         for fname in sorted(files_seen):
             fdata = self.db.get_file(fname)
             if fdata:
-                desc = fdata.get("description", "")
-                file_summaries.append({
-                    "name": fname,
-                    "description": desc[:200],
-                })
-
-        summary_tokens = sum(self._estimate_tokens(fs["description"]) for fs in file_summaries)
-        tokens_used += summary_tokens
-
-        return {
-            "topic": topic,
-            "tokens_used": tokens_used,
-            "tokens_budget": max_tokens,
-            "depth": depth,
-            "entries": entries_out,
-            "truncated": truncated,
-            "file_summaries": file_summaries,
-        }
+                response["file_summaries"].append({"name": fname, "description": fdata.get("description", "")[:200]})
+                if measure() > max_tokens:
+                    response["file_summaries"].pop()
+        measure()
+        return response
 
     def suggest_context(self, task: str, top: int = 5) -> dict:
         """Suggest files the AI should read before starting a task.
@@ -1880,126 +1858,139 @@ class KnowledgeStore:
         from destroying the index and ensures readers never see an empty
         database mid-reindex.
         """
-        # Pass 1: Parse all files into memory (outside lock — read-only)
-        parsed_files = []
-        parse_errors = []
-        for filepath in sorted(self.storage_dir.glob("*.md")):
-            try:
-                header, entries = parse_file(filepath)
-                if not header.name:
-                    header.name = filepath.stem
-                parsed_files.append((filepath, header, entries))
-            except Exception as e:
-                logger.warning("Skipping corrupt file %s during reindex: %s", filepath.name, e)
-                parse_errors.append(f"{filepath.name}: {e}")
-
-        # Pass 2: Clear DB and re-insert everything atomically (under lock).
-        # Uses BEGIN IMMEDIATE so the entire delete+insert is a single
-        # transaction — readers never see an empty database.
         with self._write_lock:
-            conn = self.db.connect()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
+            # Pass 1: Parse a consistent source snapshot under the shared lock.
+            parsed_files = []
+            parse_errors = []
+            for filepath in sorted(self.storage_dir.glob("*.md")):
+                try:
+                    self._file_path(filepath.stem)
+                    header, entries = parse_file(filepath)
+                    header.name = filepath.stem
+                    parsed_files.append((filepath, header, entries))
+                except Exception as e:
+                    logger.warning("Skipping corrupt file %s during reindex: %s", filepath.name, e)
+                    parse_errors.append(f"{filepath.name}: {e}")
 
-                # Clear all tables.
-                conn.execute("DELETE FROM entries")
-                conn.execute("DELETE FROM files")
-                for tbl in ("entries_fts", "files_fts", "entry_links"):
-                    try:
-                        conn.execute(f"DELETE FROM {tbl}")
-                    except sqlite3.OperationalError:
-                        pass  # table may not exist
+            # Pass 2: Clear DB and re-insert everything atomically (under lock).
+            # Uses BEGIN IMMEDIATE so the entire delete+insert is a single
+            # transaction — readers never see an empty database.
+            with self.db._lock:
+                conn = self.db.connect()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
 
-                count_files = 0
-                count_entries = 0
-                all_links: list[tuple] = []
+                    # Clear all tables.
+                    conn.execute("DELETE FROM entries")
+                    conn.execute("DELETE FROM files")
+                    for tbl in ("entries_fts", "files_fts", "entry_links"):
+                        try:
+                            conn.execute(f"DELETE FROM {tbl}")
+                        except sqlite3.OperationalError:
+                            pass  # table may not exist
 
-                for filepath, header, entries in parsed_files:
-                    # Insert file (inline SQL — bypass db.insert_file which has its own lock/commit)
-                    conn.execute(
-                        "INSERT INTO files (name, path, description, keywords, links, "
-                        "created_at, compacted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            header.name,
-                            str(filepath.relative_to(self.storage_dir)),
-                            header.description,
-                            json.dumps(header.keywords),
-                            json.dumps(header.links),
-                            header.created,
-                            header.compacted,
-                        ),
-                    )
+                    count_files = 0
+                    count_entries = 0
+                    all_links: list[tuple] = []
 
-                    # FTS for file
-                    try:
+                    for filepath, header, entries in parsed_files:
+                        # Insert file (inline SQL — bypass db.insert_file which has its own lock/commit)
                         conn.execute(
-                            "INSERT INTO files_fts(name, description, keywords) VALUES (?, ?, ?)",
-                            (header.name, header.description, " ".join(header.keywords)),
-                        )
-                    except sqlite3.OperationalError:
-                        pass
-
-                    count_files += 1
-
-                    for entry in entries:
-                        meta = entry.metadata
-                        # Insert entry — OR IGNORE handles duplicate epochs from archive files
-                        cursor = conn.execute(
-                            "INSERT OR IGNORE INTO entries (file_name, epoch, content, status, entry_type, tags, weight, author, hostname) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO files (name, path, description, keywords, links, "
+                            "created_at, compacted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (
                                 header.name,
-                                entry.epoch,
-                                entry.content,
-                                meta.get("status", "active"),
-                                meta.get("type", "note"),
-                                meta.get("tags", ""),
-                                meta.get("weight", "normal"),
-                                meta.get("author", ""),
-                                meta.get("hostname", ""),
+                                str(filepath.relative_to(self.storage_dir)),
+                                header.description,
+                                json.dumps(header.keywords),
+                                json.dumps(header.links),
+                                header.created,
+                                header.compacted,
                             ),
                         )
-                        if cursor.rowcount > 0:
-                            rowid = cursor.lastrowid
-                            count_entries += 1
 
-                            # FTS for entry
-                            try:
-                                conn.execute(
-                                    "INSERT INTO entries_fts(rowid, content, file_name) VALUES (?, ?, ?)",
-                                    (rowid, entry.content, header.name),
+                        # FTS for file
+                        try:
+                            conn.execute(
+                                "INSERT INTO files_fts(name, description, keywords) VALUES (?, ?, ?)",
+                                (header.name, header.description, " ".join(header.keywords)),
+                            )
+                        except sqlite3.OperationalError:
+                            pass
+
+                        count_files += 1
+
+                        for entry in entries:
+                            meta = entry.metadata
+                            # Insert entry — OR IGNORE handles duplicate epochs from archive files
+                            cursor = conn.execute(
+                                "INSERT OR IGNORE INTO entries (file_name, epoch, content, status, entry_type, tags, weight, author, hostname) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    header.name,
+                                    entry.epoch,
+                                    entry.content,
+                                    meta.get("status", "active"),
+                                    meta.get("type", "note"),
+                                    meta.get("tags", ""),
+                                    meta.get("weight", "normal"),
+                                    meta.get("author", ""),
+                                    meta.get("hostname", ""),
+                                ),
+                            )
+                            if cursor.rowcount > 0:
+                                rowid = cursor.lastrowid
+                                count_entries += 1
+
+                                # FTS for entry
+                                try:
+                                    conn.execute(
+                                        "INSERT INTO entries_fts(rowid, content, file_name) VALUES (?, ?, ?)",
+                                        (rowid, entry.content, header.name),
+                                    )
+                                except sqlite3.OperationalError:
+                                    pass
+
+                                # Collect wiki-links
+                                all_links.extend(
+                                    _build_entry_links(header.name, entry.epoch, entry.content)
                                 )
-                            except sqlite3.OperationalError:
-                                pass
+                            else:
+                                logger.warning(
+                                    "Duplicate epoch %d in %s during reindex — skipped",
+                                    entry.epoch, header.name,
+                                )
 
-                            # Collect wiki-links
-                            all_links.extend(
-                                _build_entry_links(header.name, entry.epoch, entry.content)
-                            )
-                        else:
-                            logger.warning(
-                                "Duplicate epoch %d in %s during reindex — skipped",
-                                entry.epoch, header.name,
-                            )
+                    # Exact historical references follow an explicitly recorded archive move.
+                    redirects = {}
+                    for _, archived_header, archived_entries in parsed_files:
+                        for archived_entry in archived_entries:
+                            origin = archived_entry.metadata.get("archived-from", "")
+                            if "#" in origin:
+                                old_file, old_epoch = origin.rsplit("#", 1)
+                                if old_epoch.isdigit():
+                                    redirects[(old_file, int(old_epoch))] = (archived_header.name, archived_entry.epoch)
+                    all_links = [(sf, se, *redirects.get((tf, te), (tf, te)), kind)
+                                 for sf, se, tf, te, kind in all_links]
 
-                # Bulk-insert entry links
-                if all_links:
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO entry_links "
-                        "(source_file, source_epoch, target_file, target_epoch, link_type) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        all_links,
-                    )
-                count_links = len(all_links)
+                    # Bulk-insert entry links
+                    if all_links:
+                        conn.executemany(
+                            "INSERT OR IGNORE INTO entry_links "
+                            "(source_file, source_epoch, target_file, target_epoch, link_type) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            all_links,
+                        )
+                    count_links = len(all_links)
 
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
-        msg = f"Reindexed {count_files} files with {count_entries} entries."
-        if count_links:
-            msg += f" {count_links} entry link(s) indexed."
-        if parse_errors:
-            msg += f" Skipped {len(parse_errors)} corrupt file(s): {'; '.join(parse_errors)}"
-        return msg
+            msg = f"Reindexed {count_files} files with {count_entries} entries."
+            if count_links:
+                msg += f" {count_links} entry link(s) indexed."
+            if parse_errors:
+                msg += f" Skipped {len(parse_errors)} corrupt file(s): {'; '.join(parse_errors)}"
+            return msg

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Multiple local MCP clients now share coordinated storage without terminating one another; session anchors and provenance remain independent.
+- Atomic entry/configuration updates, recoverable archives, consistent reindex transactions, and offline `hkb doctor` / `hkb reindex` improve recovery.
+- Sync uses staged three-way merges, independent direction checkpoints, elected workers, conditional leases, and version 2 manifests with immutable blobs and deletion records. **Upgrade all clients sharing a remote destination before publication.**
+- Search applies metadata/domain filters consistently, restores full entry context, caches ripgrep epoch maps, and estimates complete context-response size.
+- Bounded asynchronous MCP dispatch, graceful operation draining, explicit batch truncation, task pagination, and MCP SDK 1.x bounds improve integration.
+- Refreshed GitHub Pages landing page with an accessible memory walkthrough; canonical Markdown guides generate human documentation and machine-readable references.
+
 ## v1.8.0
 ### Context-Aware Retrieval
 - **`@weight` metadata**: New entry importance field (`high`, `normal`, `low`). High-weight entries get 1.15x score boost and are exempt from staleness penalty.

@@ -24,7 +24,7 @@ Files are named topics (`domain.topic.subtopic`, 2-4 dot-separated segments). Ea
 
 - **Know the file name** → `hkb_show(name="file.name")` to read it
 - **Don't know the file** → `hkb_search(query="2-4 keywords")` — use keywords, not sentences
-- **Need exact string or regex** → `hkb_search(mode="rg", query="exact phrase")`
+- **Need keyword matches in source files** → `hkb_search(mode="rg", query="pool timeout")` (multiple words match as alternatives; the MCP tool does not expose a raw-regex option)
 - **Want a list of all files** → `hkb_show()` (no name)
 - **Want cross-file timeline** → `hkb_search(mode="recent")`
 - **Need token-budgeted context for a task** → `hkb_context(topic="...")`
@@ -81,7 +81,7 @@ Every `hkb_add` call returns one of three results:
 
 ### Entry metadata format
 
-`@key: value` lines at the START of entry content are parsed as metadata. They are not stored in the content body — they become DB columns for filtering and scoring.
+`@key: value` lines at the START of entry content are parsed as metadata. They remain in the Markdown source and are indexed for filtering and scoring; returned content bodies separate the metadata from the prose.
 
 ```
 @type: finding
@@ -139,7 +139,7 @@ Fixed the search bug.
 
 ### Content constraints
 
-- No `>>>` or `<<<` on a line by itself (entry delimiters)
+- Do not include entry delimiter lines such as `>>> 1789142400` or `<<<` in content
 - Max entry size: 1 MiB
 - One topic per entry — split multi-topic content into separate adds
 
@@ -168,3 +168,13 @@ Examples: `myproject.architecture`, `security.threat-intel.ioc-feeds`, `tasks.my
 **Investigation:** `finding(active)` → `decision` reached → original finding `superseded`
 
 **Knowledge:** `note(active)` → better info available → `superseded` → eventually `archive`
+
+## Multiple clients and reliable retries
+
+Each local MCP client launches its own `hkb-mcp` process against the same KB root. Shared storage writes are coordinated; session anchors remain process-local. Set a distinct `HKB_SOURCE` per client for provenance. Restart every client after upgrading.
+
+Read the returned epoch instead of predicting a timestamp. Inspect recent entries before retrying an append with a lost response; durable idempotency keys are not provided. Batch updates process at most 50 items and report `skipped` and `truncated`; task lists expose `has_more` and `next_offset`.
+
+Context budgets estimate the complete JSON response. They are not a model-specific tokenizer guarantee. Session anchors influence search and suggestions; packed context is returned without post-pack score mutations.
+
+Sync is optional. This release publishes manifest version 2; upgrade all clients using the same remote bucket/prefix before enabling it. See [sync](docs/SYNC.md) and [maintenance](docs/OPERATIONS.md).

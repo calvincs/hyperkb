@@ -372,3 +372,98 @@ def _parse_yaml_fragment(text: str) -> Optional[dict]:
     except yaml.YAMLError:
         pass
     return None
+
+
+def merge_versions(base: Optional[bytes], ours: Optional[bytes],
+                   theirs: Optional[bytes], filename: str) -> tuple[Optional[bytes], dict]:
+    """Three-way merge complete files; absence means deletion, never an empty base.
+
+    Preserve modified content on modify/delete and retain both conflicting entry
+    revisions. With no common ancestor, independent additions are both retained.
+    """
+    if ours == theirs or theirs == base:
+        return ours, {}
+    if ours == base:
+        return theirs, {}
+    info = {"file": filename, "timestamp": int(time.time()), "conflicts": 1,
+            "resolutions": []}
+    if ours is None or theirs is None:
+        info["resolutions"].append({"strategy": "preserve_modification"})
+        return ours if ours is not None else theirs, info
+
+    from dataclasses import replace
+    import yaml
+    # Rebuilding parsed entries must not silently omit free text, custom header
+    # fields, malformed delimiters, or partial writes from either source.
+    for version in (base, ours, theirs):
+        if version is None:
+            continue
+        lines = version.decode("utf-8").splitlines()
+        if not lines or lines[0].strip() != "---":
+            raise ValueError(f"Cannot safely merge unstructured concurrent edits: {filename}")
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is None:
+            raise ValueError(f"Incomplete header in {filename}")
+        metadata = yaml.safe_load("\n".join(lines[1:end]))
+        if not isinstance(metadata, dict) or set(metadata) - set(vars(FileHeader(name="", description=""))):
+            raise ValueError(f"Cannot safely merge custom header in {filename}")
+        inside = False
+        for line in lines[end + 1:]:
+            if ENTRY_START_RE.match(line):
+                if inside:
+                    raise ValueError(f"Nested entry delimiter in {filename}")
+                inside = True
+            elif ENTRY_END_RE.match(line):
+                if not inside:
+                    raise ValueError(f"Unmatched entry delimiter in {filename}")
+                inside = False
+            elif not inside and line.strip():
+                raise ValueError(f"Cannot safely merge text outside entries in {filename}")
+        if inside:
+            raise ValueError(f"Unterminated entry in {filename}")
+    bh, be = parse_text((base or b"").decode("utf-8"))
+    oh, oe = parse_text(ours.decode("utf-8"))
+    th, te = parse_text(theirs.decode("utf-8"))
+    # Do not reconstruct malformed/arbitrary markdown through the KB parser:
+    # fail safely with all source versions left intact for manual reconciliation.
+    if not oh.name or not th.name:
+        raise ValueError(f"Cannot safely merge unstructured concurrent edits: {filename}")
+    def indexed(entries):
+        result = {entry.epoch: entry for entry in entries}
+        if len(result) != len(entries):
+            raise ValueError(f"Duplicate entry epochs in {filename}")
+        return result
+    bases, left, right = indexed(be), indexed(oe), indexed(te)
+    epochs = set(bases) | set(left) | set(right)
+    used = set(epochs)
+    merged = []
+    def signature(entry):
+        return render_entry(entry) if entry is not None else None
+    for epoch in sorted(epochs):
+        b, o, t = bases.get(epoch), left.get(epoch), right.get(epoch)
+        if signature(o) == signature(t) or signature(t) == signature(b):
+            chosen = [o]
+        elif signature(o) == signature(b):
+            chosen = [t]
+        elif o is None or t is None:
+            chosen = [o or t]
+        else:
+            bumped = epoch + 1
+            while bumped in used:
+                bumped += 1
+            used.add(bumped)
+            chosen = [t, replace(o, epoch=bumped)]
+        merged.extend(entry for entry in chosen if entry is not None)
+    if oh == bh:
+        header = th
+    elif th == bh or oh == th:
+        header = oh
+    else:
+        header = replace(oh, keywords=sorted(set(oh.keywords) | set(th.keywords)),
+                         links=sorted(set(oh.links) | set(th.links)))
+        # No reliable edit timestamp exists; retain both descriptions.
+        if oh.description != th.description:
+            header.description = " / ".join(dict.fromkeys(filter(None, (oh.description, th.description))))
+    text = render_header(header) + "".join(render_entry(e) for e in sorted(merged, key=lambda e: e.epoch))
+    info["resolutions"].append({"strategy": "three_way_entry_merge", "entries_result": len(merged)})
+    return text.encode("utf-8"), info

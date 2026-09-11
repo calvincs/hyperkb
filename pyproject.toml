@@ -17,12 +17,12 @@ dependencies = [
 
 [project.optional-dependencies]
 crypto = ["cryptography>=42.0"]
-mcp = ["mcp[cli]>=1.0"]
-sync = ["boto3>=1.34", "watchdog>=4.0"]
+mcp = ["mcp[cli]>=1.30,<2"]
+sync = ["boto3>=1.40.0", "watchdog>=4.0"]
 all = [
     "cryptography>=42.0",
-    "mcp[cli]>=1.0",
-    "boto3>=1.34",
+    "mcp[cli]>=1.30,<2",
+    "boto3>=1.40.0",
     "watchdog>=4.0",
 ]
 dev = ["pytest>=7.0", "moto[s3]>=5.0"]

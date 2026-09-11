@@ -1,0 +1,37 @@
+# HyperKB
+
+> Persistent Markdown memory for MCP clients. Local ripgrep + BM25 search,
+> complete context retrieval, and optional Git-backed S3 synchronization.
+
+HyperKB is MIT-licensed Python software. Knowledge lives in topic-named Markdown
+files; SQLite is a rebuildable index. Multiple local stdio clients share storage
+with coordinated mutations and independent session context. There is no public
+HTTP MCP endpoint in this project.
+
+## Start here
+
+- [Short agent guide](llm.txt)
+- [Getting started](docs/GETTING_STARTED.md)
+- [How it works](docs/UNDERSTANDING.md)
+- [MCP & clients](docs/MCP.md)
+- [Agent reference](SKILL.md)
+
+## Work with knowledge
+
+- [Everyday workflows](docs/WORKFLOWS.md)
+- [Search & context](docs/SEARCH.md)
+- [Sync and migration](docs/SYNC.md)
+- [Maintenance & recovery](docs/OPERATIONS.md)
+- [Configuration](docs/CONFIGURATION.md)
+
+## Project
+
+- [Source](https://github.com/calvincs/hyperkb)
+- [Readable documentation](docs/index.html)
+- [License](LICENSE)
+- [Changelog](https://github.com/calvincs/hyperkb/blob/main/CHANGELOG.md)
+
+Local search needs no model API key. Context token counts are estimates, not a
+specific model tokenizer's count. Entries can be amended, so storage is not an
+immutable audit log. Upgrade every client sharing a bucket before publishing a
+version 2 sync manifest; old clients do not understand immutable blob references.

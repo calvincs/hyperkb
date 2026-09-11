@@ -23,6 +23,8 @@ File format:
 """
 
 import json
+import os
+import tempfile
 import re
 import time
 from datetime import datetime, timezone
@@ -190,10 +192,43 @@ def create_file_content(header: FileHeader, entries: Optional[list[Entry]] = Non
     return content
 
 
+def atomic_write_text(filepath: Path, content: str, encoding: str = "utf-8") -> None:
+    """Publish a complete, flushed file with an atomic same-directory rename."""
+    filepath = Path(filepath)
+    fd, temporary = tempfile.mkstemp(prefix=f".{filepath.name}.", suffix=".tmp", dir=filepath.parent)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, filepath)
+        if os.name != "nt":
+            directory = os.open(filepath.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def append_entry_to_file(filepath: Path, entry: Entry) -> None:
-    """Append an entry to an existing knowledge file."""
-    with open(filepath, "a", encoding="utf-8") as f:
-        f.write(render_entry(entry))
+    """Atomically append an entry; callers serialize read/replace with storage_lock."""
+    atomic_write_text(filepath, filepath.read_text(encoding="utf-8") + render_entry(entry))
+
+
+def normalize_filename(name: str) -> str:
+    """Normalize an optional .md suffix and reject unsafe storage paths."""
+    if not isinstance(name, str):
+        raise ValueError("Filename must be a string")
+    if name.endswith(".md"):
+        name = name[:-3]
+    if not name or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name) or ".." in name:
+        raise ValueError("Invalid filename: use lowercase dotted names with hyphens")
+    if name.endswith("."):
+        raise ValueError("Invalid filename")
+    return name
 
 
 def extract_wikilinks(text: str) -> list[tuple[str, Optional[int]]]:

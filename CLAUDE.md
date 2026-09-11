@@ -1,15 +1,17 @@
-# CLAUDE.md
+# HyperKB development
 
-**hyperkb** is a flat-file knowledge base with hybrid search (ripgrep + BM25 + optional vector). Markdown files with YAML frontmatter in `~/.hkb/storage/` are the source of truth; SQLite is a rebuildable index. The `hkb` CLI handles only admin (`init`, `config`); all knowledge operations run through the MCP server (`hkb-mcp`). Architecture details, design decisions, search algorithms, and tech debt are documented in the `hkb_*` MCP tools — use `hkb_search` and `hkb_show` on the `hyperkb.*` files to find specifics.
+HyperKB is a local Markdown knowledge base with ripgrep + SQLite/FTS5 search. Python 3.10+. Knowledge operations run through ten stdio MCP tools; the CLI provides administration and offline recovery.
 
-Data flow: `mcp_server.py` → `store.py` → `db.py` + `search.py` + `format.py`. Entry search uses ripgrep + FTS5 BM25 only (no vectors on entries). File routing uses BM25 + vector on file metadata + optional LLM fallback. All optional deps (sentence-transformers, anthropic, cryptography, mcp) degrade gracefully. Python 3.10+, dataclasses (no Pydantic), sqlite3 stdlib (no ORM), relative imports throughout.
+Read README.md and docs/ before changing behavior. Canonical user documentation is kept in docs/*.md. The website is built from an explicit public catalog; do not publish CODE_REVIEW.md, private KB files, or arbitrary repository contents.
 
-## Development
+## Architecture
 
-```bash
-pip install -e ".[all,dev]"                    # Setup (requires ripgrep on PATH)
-.venv/bin/pytest tests/ -v                     # MUST use .venv/bin/pytest
-hkb init && hkb config embedding_model         # Admin CLI
-```
+`mcp_server.py` dispatches bounded blocking work to `store.py`. The store coordinates atomic Markdown writes, `db.py`, `format.py`, and `search.py`. `locking.py` coordinates storage mutations across processes. `sync.py` and `remote.py` handle optional S3 synchronization with one elected local background worker. Session anchors and process provenance remain separate per MCP client.
 
-No linter or formatter configured. Tests use `tmp_path` + `monkeypatch.setenv("HOME", ...)` for isolation; shared fixtures in `tests/conftest.py`.
+Markdown is the source of truth; SQLite is rebuildable. Entries can be amended. Search does not use embedding vectors. New sync manifests use version 2 immutable blob references; all clients sharing a destination must be upgraded together. Keep migration documentation accurate.
+
+## Validation
+
+Use `.venv/bin/pytest tests/ -q` with the checkout on PYTHONPATH. Tests use temporary knowledge roots and mocked S3, never a user's real KB. Live stdio/multiprocess tests require an environment that permits event-loop wakeups and subprocesses.
+
+For the website, install `website/requirements.txt`, run `scripts/build_site.py`, then `scripts/check_site.py` and the renderer tests in `website/tests`. Review the home page, documentation hub, and representative articles at desktop and narrow widths. Preserve reduced-motion support, pause controls, no-JavaScript readability, source links, and public Markdown URLs.

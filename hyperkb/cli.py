@@ -1,13 +1,14 @@
 """CLI for hyperkb knowledge base.
 
-Admin commands (init, config, update) for bootstrapping, configuration,
+Admin commands (init, config, doctor, reindex, update) for bootstrapping, configuration,
 and upgrades. All operational commands (search, add, create, show, list,
-check, links, reindex) are served exclusively through the MCP server.
+check, links) are served exclusively through the MCP server.
 """
 
 import logging
-import os
-import signal
+import json
+import sqlite3
+from dataclasses import fields
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from . import __version__
 from .config import KBConfig
 from .crypto import is_sensitive_field, mask_value
 from .store import KnowledgeStore
+from .db import KBDatabase
 
 logger = logging.getLogger("hyperkb.cli")
 
@@ -36,7 +38,7 @@ def cli():
     \b
     OPERATIONS (via MCP):
       All knowledge operations (search, add, create, show, list, check,
-      links, reindex) are handled by the MCP server. Register the
+      links) are handled by the MCP server. Register the
       hkb-mcp server in your Claude Code settings to use them.
 
     \b
@@ -129,11 +131,11 @@ def config(key, value, use_set, path):
         # View mode
         try:
             cfg = KBConfig.load(path)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ValueError) as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        if not hasattr(cfg, key):
+        if key not in {f.name for f in fields(cfg)}:
             click.echo(f"Unknown config key: {key}", err=True)
             sys.exit(1)
 
@@ -146,27 +148,102 @@ def config(key, value, use_set, path):
         # Set mode
         try:
             cfg = KBConfig.load(path)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ValueError) as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        if not hasattr(cfg, key):
+        if key not in {f.name for f in fields(cfg)}:
             click.echo(f"Unknown config key: {key}", err=True)
             sys.exit(1)
 
-        current = getattr(cfg, key)
-        if isinstance(current, float):
-            value = float(value)
-        elif isinstance(current, int):
-            value = int(value)
-
-        setattr(cfg, key, value)
-        cfg.save()
+        try:
+            value = cfg.set_value(key, value)
+        except (ValueError, OSError) as e:
+            raise click.ClickException(str(e)) from e
 
         if is_sensitive_field(key):
             click.echo(f"{key} = {mask_value(str(value))}")
         else:
             click.echo(f"{key} = {value}")
+
+
+class _ReadOnlyDatabase(KBDatabase):
+    """Health-query adapter that never migrates, creates or checkpoints an index."""
+
+    def connect(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only=ON")
+            self.conn.execute("BEGIN")
+        return self.conn
+
+    def close(self):
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+
+
+def _check_doctor_schema(conn):
+    required = {
+        "files": {"name", "path", "description", "keywords", "links", "created_at", "compacted_at"},
+        "entries": {"file_name", "epoch", "content", "status", "entry_type", "tags", "weight", "author", "hostname"},
+        "entry_links": {"source_file", "source_epoch", "target_file", "target_epoch", "link_type"},
+        "entries_fts": {"content", "file_name"},
+        "files_fts": {"name", "description", "keywords"},
+    }
+    missing = []
+    for table, columns in required.items():
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not present:
+            missing.append(table)
+        else:
+            missing.extend(f"{table}.{column}" for column in sorted(columns - present))
+    if missing:
+        raise click.ClickException(
+            "Index schema migration needed (missing " + ", ".join(missing) +
+            "). Run hkb reindex with the same --path; doctor left the index unchanged."
+        )
+
+
+@cli.command()
+@click.option("--path", default=None, help="KB root directory (default: ~/.hkb/).")
+def doctor(path):
+    """Check configuration, SQLite integrity and index health without MCP."""
+    store = None
+    try:
+        cfg = KBConfig.load(path)
+        if not cfg.db_path.exists():
+            raise click.ClickException("Index is missing. Run hkb reindex with the same --path.")
+        store = KnowledgeStore(cfg)
+        store.db = _ReadOnlyDatabase(cfg)
+        conn = store.db.connect()
+        check = [tuple(row) for row in conn.execute("PRAGMA quick_check")]
+        if check != [("ok",)]:
+            raise click.ClickException(f"Index integrity failed: {check}. Run hkb reindex.")
+        _check_doctor_schema(conn)
+        click.echo(json.dumps(store.health_check(include_tier3=False), indent=2))
+    except (OSError, ValueError, sqlite3.Error) as e:
+        raise click.ClickException(f"{e}. Run hkb reindex with the same --path to rebuild the index.") from e
+    finally:
+        if store:
+            store.close()
+
+
+@cli.command()
+@click.option("--path", default=None, help="KB root directory (default: ~/.hkb/).")
+def reindex(path):
+    """Rebuild the index from markdown, preserving configuration and corrupt DBs."""
+    store = None
+    try:
+        store = KnowledgeStore(KBConfig.load(path))
+        recovered = store.recover_index()
+        click.echo(recovered or store.reindex())
+    except (OSError, ValueError, sqlite3.Error) as e:
+        raise click.ClickException(str(e)) from e
+    finally:
+        if store:
+            store.close()
 
 
 def _find_repo_dir(config_repo: str = "") -> Path | None:
@@ -348,18 +425,8 @@ def update_apply():
             dst.write_text(src.read_text())
             click.echo(f"Copied skill: {dst}")
 
-    # Step 7: Restart MCP server
-    lock_path = Path.home() / ".hkb" / "server.lock"
-    if lock_path.exists():
-        try:
-            pid = int(lock_path.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-            click.echo(f"Sent SIGTERM to MCP server (PID {pid}).")
-            click.echo("The server will restart automatically when next needed.")
-        except (ValueError, ProcessLookupError, PermissionError):
-            click.echo("MCP server not running or PID stale — skipping restart.")
-    else:
-        click.echo("No MCP server lock found — skipping restart.")
+    # Each MCP client owns its stdio process; clients restart their own server.
+    click.echo("Restart your connected MCP clients to load the updated version.")
 
     # Step 8: Log the update
     new_tag = _get_local_tag(repo) or new_head[:8]
@@ -412,7 +479,7 @@ def setup(path):
     """
     try:
         cfg = KBConfig.load(path)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
@@ -501,7 +568,7 @@ def sync_status(path):
     """
     try:
         cfg = KBConfig.load(path)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 

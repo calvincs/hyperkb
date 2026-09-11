@@ -37,6 +37,7 @@ def ripgrep_search(
     case_sensitive: bool = False,
     regex: bool = False,
     timeout: float = 10.0,
+    domain: Optional[str] = None,
 ) -> list[SearchResult]:
     """Search knowledge files with ripgrep.
 
@@ -49,11 +50,17 @@ def ripgrep_search(
     cmd = [
         "rg",
         "--json",
-        "--max-count", str(max_results),
-        "--glob", "*.md",
         "--multiline",
-        "-B", "50",  # Before-context to capture >>> EPOCH markers
     ]
+
+    if domain:
+        # rg's positive globs form a union. Do not include *.md here: that
+        # would undo namespace pruning. Escape glob syntax to keep a literal
+        # domain, matching either its own file or its dotted descendants.
+        escaped_domain = re.sub(r"([\\*?{}!\[\]])", r"\\\1", domain)
+        cmd.extend(["--glob", f"{escaped_domain}.md", "--glob", f"{escaped_domain}.*.md"])
+    else:
+        cmd.extend(["--glob", "*.md"])
 
     if not case_sensitive:
         cmd.append("--ignore-case")
@@ -68,7 +75,7 @@ def ripgrep_search(
             cmd.extend(["--fixed-strings"])
         rg_pattern = query
 
-    cmd.extend([rg_pattern, str(root)])
+    cmd.extend(["--", rg_pattern, str(root)])
 
     try:
         result = subprocess.run(
@@ -80,31 +87,17 @@ def ripgrep_search(
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return []
 
-    # Collect context lines keyed by (filepath, line_number) to find epochs
-    context_lines: list[dict] = []
     matches: list[dict] = []
-
-    for line in result.stdout.strip().split("\n"):
-        if not line:
-            continue
+    for line in result.stdout.splitlines():
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-
-        if obj.get("type") == "context":
-            context_lines.append(obj["data"])
-        elif obj.get("type") == "match":
-            # Attach preceding context lines, then reset
-            obj["_context"] = list(context_lines)
+        if obj.get("type") == "match":
             matches.append(obj)
-            context_lines = []
-        else:
-            # begin/end/summary — reset context on begin
-            if obj.get("type") == "begin":
-                context_lines = []
 
     results = []
+    epoch_cache = {}
     for obj in matches:
         data = obj["data"]
         match_filepath = Path(data["path"]["text"])
@@ -112,7 +105,7 @@ def ripgrep_search(
         matched_text = data["lines"]["text"].strip()
 
         epoch = _extract_epoch_from_rg_match(
-            data, obj.get("_context", []), filepath=match_filepath,
+            data, [], filepath=match_filepath, epoch_cache=epoch_cache,
         )
 
         results.append(SearchResult(
@@ -124,7 +117,12 @@ def ripgrep_search(
             snippet=matched_text[:200],
         ))
 
-    return results
+    unique = {}
+    for candidate in results:
+        key = (candidate.file_name, candidate.epoch)
+        if key not in unique or candidate.score > unique[key].score:
+            unique[key] = candidate
+    return list(unique.values())
 
 
 def _score_rg_match(data: dict, query: str) -> float:
@@ -168,7 +166,7 @@ def _score_rg_match(data: dict, query: str) -> float:
 
 
 def _extract_epoch_from_rg_match(
-    data: dict, context: list[dict], filepath: Optional[Path] = None,
+    data: dict, context: list[dict], filepath: Optional[Path] = None, epoch_cache=None,
 ) -> Optional[int]:
     """Extract the entry epoch from a ripgrep match and its before-context.
 
@@ -177,6 +175,10 @@ def _extract_epoch_from_rg_match(
     filepath is provided, falls back to scanning the file for the nearest
     preceding '>>>' marker relative to the match line number.
     """
+    # The request-local map also handles short epochs and entry closing markers.
+    if epoch_cache is not None and filepath is not None and data.get("line_number") is not None:
+        return _scan_file_for_epoch(filepath, data["line_number"], epoch_cache)
+
     # Check the match line itself
     line_text = data["lines"]["text"]
     m = re.search(r">>> (\d{10,})", line_text)
@@ -194,24 +196,33 @@ def _extract_epoch_from_rg_match(
     if filepath is not None:
         match_line_no = data.get("line_number")
         if match_line_no is not None:
-            return _scan_file_for_epoch(filepath, match_line_no)
+            return _scan_file_for_epoch(filepath, match_line_no, epoch_cache)
 
     return None
 
 
-def _scan_file_for_epoch(filepath: Path, match_line_no: int) -> Optional[int]:
-    """Scan a file backwards from match_line_no for the nearest >>> EPOCH marker."""
-    try:
-        lines = filepath.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-
-    # match_line_no is 1-based from ripgrep
-    for i in range(min(match_line_no - 1, len(lines) - 1), -1, -1):
-        m = re.search(r">>> (\d{10,})", lines[i])
-        if m:
-            return int(m.group(1))
-    return None
+def _scan_file_for_epoch(filepath: Path, match_line_no: int, cache=None) -> Optional[int]:
+    """Build a line-to-entry map at most once per file in a search request."""
+    if cache is None:
+        cache = {}
+    if filepath not in cache:
+        try:
+            lines = filepath.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            cache[filepath] = []
+        else:
+            epochs = []
+            epoch = None
+            for line in lines:
+                marker = re.fullmatch(r">>> (\d+)\s*", line)
+                if marker:
+                    epoch = int(marker.group(1))
+                elif re.fullmatch(r"<<<\s*", line):
+                    epoch = None
+                epochs.append(epoch)
+            cache[filepath] = epochs
+    epochs = cache[filepath]
+    return epochs[match_line_no - 1] if 0 < match_line_no <= len(epochs) else None
 
 
 def ripgrep_search_filenames(
@@ -224,7 +235,7 @@ def ripgrep_search_filenames(
         # Fallback to glob
         return [f.stem for f in root.glob("*.md") if query.lower() in f.stem.lower()]
 
-    cmd = ["rg", "--files", "--glob", f"*{query}*.md", str(root)]
+    cmd = ["rg", "--files", "--glob", f"*{query}*.md", "--", str(root)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return [Path(line.strip()).stem for line in result.stdout.strip().split("\n") if line.strip()]
@@ -258,7 +269,8 @@ class HybridSearch:
         """Execute a search across configured methods.
 
         Args:
-            query: The search query (keywords, phrase, or regex).
+            query: Search terms. Ripgrep matches any literal whitespace-separated term;
+                BM25 applies tokenization and stemming.
             mode: "hybrid" (rg + bm25), "rg" (ripgrep only),
                   "bm25" (FTS5 only).
             limit: Max results to return.
@@ -303,6 +315,12 @@ class HybridSearch:
             # Post-filter ripgrep results for archive exclusion
             if exclude_archives:
                 rg_results = [r for r in rg_results if not r.file_name.endswith(".archive")]
+            self._enrich_metadata(rg_results)
+            rg_results = [r for r in rg_results
+                          if (status is None or r.status == status)
+                          and (entry_type is None or r.entry_type == entry_type)
+                          and (author is None or r.author == author)
+                          and (hostname is None or r.hostname == hostname)]
             results.extend(rg_results)
 
         if mode in ("hybrid", "bm25"):
@@ -311,14 +329,12 @@ class HybridSearch:
                 after_epoch=after_epoch, before_epoch=before_epoch,
                 status=status, entry_type=entry_type,
                 exclude_archives=exclude_archives,
-                author=author, hostname=hostname,
+                author=author, hostname=hostname, domain=domain,
             )
-            if domain:
-                bm25_results = [r for r in bm25_results if r.file_name.startswith(domain)]
             results.extend(bm25_results)
 
         # Deduplicate, merge scores, enrich, boost, then apply offset
-        merged = self._merge_results(results, limit + offset)
+        merged = self._merge_results(results, len(results))
         self._enrich_metadata(merged)
         self._apply_boosts(merged)
         merged.sort(key=lambda x: x.score, reverse=True)
@@ -366,71 +382,8 @@ class HybridSearch:
 
     def _rg_scoped(self, query: str, domain: str, limit: int) -> list[SearchResult]:
         """Ripgrep search scoped to a domain prefix."""
-        if not RG_AVAILABLE:
-            return []
-
-        # Multi-term queries: use regex alternation to match ANY term.
-        terms = query.split()
-        if len(terms) > 1:
-            rg_pattern = "|".join(re.escape(t) for t in terms)
-            fixed_strings_flag = []
-        else:
-            rg_pattern = query
-            fixed_strings_flag = ["--fixed-strings"]
-
-        cmd = [
-            "rg", "--json",
-            "--max-count", str(limit),
-            "--glob", f"{domain}.*.md",
-            "--ignore-case",
-            *fixed_strings_flag,
-            "-B", "50",
-            rg_pattern,
-            str(self.root),
-        ]
-
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=self.config.rg_timeout,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return []
-
-        context_lines: list[dict] = []
-        matches: list[dict] = []
-
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("type") == "context":
-                context_lines.append(obj["data"])
-            elif obj.get("type") == "match":
-                obj["_context"] = list(context_lines)
-                matches.append(obj)
-                context_lines = []
-            elif obj.get("type") == "begin":
-                context_lines = []
-
-        results = []
-        for obj in matches:
-            data = obj["data"]
-            match_filepath = Path(data["path"]["text"])
-            results.append(SearchResult(
-                file_name=match_filepath.stem,
-                content=data["lines"]["text"].strip(),
-                epoch=_extract_epoch_from_rg_match(
-                    data, obj.get("_context", []), filepath=match_filepath,
-                ),
-                score=_score_rg_match(data, query),
-                source="rg",
-                snippet=data["lines"]["text"].strip()[:200],
-            ))
-        return results
+        results = ripgrep_search(query, self.root, limit, timeout=self.config.rg_timeout, domain=domain)
+        return [r for r in results if r.file_name == domain or r.file_name.startswith(domain + ".")]
 
     def _enrich_metadata(self, results: list[SearchResult]) -> None:
         """Fill in metadata for results that lack it (e.g. rg-only results).
@@ -438,16 +391,18 @@ class HybridSearch:
         Results from BM25 already carry status/entry_type/tags from the DB.
         Results from ripgrep don't, so we do a targeted DB lookup for each.
         """
+        keys = [(r.file_name, r.epoch) for r in results if r.epoch is not None]
+        rows = {(row["file_name"], row["epoch"]): row for row in self.db.get_entries_by_keys(keys)}
         for r in results:
-            if r.epoch and not r.status and not r.entry_type:
-                row = self.db.get_entry(r.file_name, r.epoch)
-                if row:
-                    r.status = row.get("status") or ""
-                    r.entry_type = row.get("entry_type") or ""
-                    r.tags = row.get("tags") or ""
-                    r.weight = row.get("weight") or "normal"
-                    r.author = row.get("author") or ""
-                    r.hostname = row.get("hostname") or ""
+            row = rows.get((r.file_name, r.epoch))
+            if row:
+                r.content = row["content"]
+                r.status = row.get("status") or ""
+                r.entry_type = row.get("entry_type") or ""
+                r.tags = row.get("tags") or ""
+                r.weight = row.get("weight") or "normal"
+                r.author = row.get("author") or ""
+                r.hostname = row.get("hostname") or ""
 
     # Boost constants
     RECENCY_HALF_LIFE_DAYS = 180  # 6 months

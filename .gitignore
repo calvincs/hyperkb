@@ -40,3 +40,6 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+
+# Generated GitHub Pages output
+.site-build/

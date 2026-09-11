@@ -18,18 +18,20 @@ Register in Claude Code settings:
 """
 
 import argparse
+import functools
+import inspect
+
+import anyio
 import json
 import logging
-import os
 import signal
 import sqlite3
-import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -48,218 +50,13 @@ class AppContext:
     update_available: str = ""  # e.g. "v0.1.0 → v0.2.0" if newer version exists
     anchors: list = None  # Session anchor topics
     anchor_files: dict = None  # {file_name: max_score} for anchor boost
+    tool_limiter: object | None = None  # Per-client bounded blocking work
 
     def __post_init__(self):
         if self.anchors is None:
             self.anchors = []
         if self.anchor_files is None:
             self.anchor_files = {}
-
-
-# ---------------------------------------------------------------------------
-# Process-level exclusive lock
-# ---------------------------------------------------------------------------
-
-LOCK_FILENAME = "server.lock"
-
-_SIGTERM_TIMEOUT = 5   # seconds to wait after SIGTERM
-_SIGKILL_TIMEOUT = 2   # seconds to wait after SIGKILL
-
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
-
-
-class _ServerLock:
-    """Prevents multiple hkb-mcp processes from sharing the same KB.
-
-    Uses ``fcntl.flock(LOCK_EX | LOCK_NB)`` on ``<hkb_dir>/server.lock``.
-    The kernel auto-releases the lock when the process exits (including
-    SIGKILL / os._exit()), so there is no stale-lock problem under normal
-    circumstances.
-
-    However, when a client (e.g. Claude Code) reconnects, it may spawn a
-    new server without killing the old one.  The old process stays alive
-    with a dead stdio pipe, holding the flock.  To recover, ``acquire()``
-    will detect the stale holder, terminate it gracefully, and retry.
-
-    On platforms without ``fcntl`` (Windows) the lock is silently skipped.
-    """
-
-    def __init__(self, hkb_dir: Path):
-        self._path = hkb_dir / LOCK_FILENAME
-        self._fd: int | None = None
-
-    # -- helpers --
-
-    @staticmethod
-    def _read_pid(fd: int) -> str:
-        """Read PID string from an open lock file (best-effort)."""
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            data = os.read(fd, 64)
-            return data.decode("ascii", errors="replace").strip()
-        except OSError:
-            return "unknown"
-
-    @staticmethod
-    def _is_hkb_mcp_process(pid: int) -> bool:
-        """Check whether *pid* is an hkb-mcp server process.
-
-        On Linux, reads ``/proc/<pid>/cmdline``.  Falls back to a simple
-        liveness check (``os.kill(pid, 0)``) on other platforms.
-        """
-        try:
-            cmdline_path = Path(f"/proc/{pid}/cmdline")
-            if cmdline_path.exists():
-                raw = cmdline_path.read_bytes()
-                text = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
-                return "hkb-mcp" in text or "mcp_server" in text
-            # Non-Linux: just check if the process is alive.
-            os.kill(pid, 0)
-            return True
-        except (PermissionError, ProcessLookupError, OSError):
-            return False
-
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        """Return True if *pid* is alive (not dead and not zombie)."""
-        try:
-            os.waitpid(pid, os.WNOHANG)  # reap zombie if it's our child
-        except ChildProcessError:
-            pass  # not our child — that's fine
-        except OSError:
-            pass
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True  # can't signal but it exists
-
-    @staticmethod
-    def _terminate_stale(pid: int) -> bool:
-        """Try to terminate *pid* gracefully (SIGTERM), escalate to SIGKILL.
-
-        Returns True if the process is confirmed dead.
-        """
-        if not _ServerLock._pid_alive(pid):
-            return True
-
-        # SIGTERM
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-
-        deadline = time.monotonic() + _SIGTERM_TIMEOUT
-        while time.monotonic() < deadline:
-            if not _ServerLock._pid_alive(pid):
-                return True
-            time.sleep(0.1)
-
-        # SIGKILL
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-
-        deadline = time.monotonic() + _SIGKILL_TIMEOUT
-        while time.monotonic() < deadline:
-            if not _ServerLock._pid_alive(pid):
-                return True
-            time.sleep(0.1)
-
-        return False
-
-    # -- public API --
-
-    def acquire(self) -> None:
-        if not _HAS_FCNTL:
-            logger.warning(
-                "fcntl unavailable (Windows?) — skipping server lock. "
-                "Running multiple hkb-mcp instances may corrupt the index."
-            )
-            return
-
-        fd = os.open(str(self._path), os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            existing_pid_str = self._read_pid(fd)
-            os.close(fd)
-
-            # --- Stale process recovery ---
-            try:
-                existing_pid = int(existing_pid_str)
-            except (ValueError, TypeError):
-                raise RuntimeError(
-                    f"Lock held by unparseable PID ({existing_pid_str!r}). "
-                    f"Remove {self._path} manually."
-                )
-
-            if existing_pid == os.getpid():
-                raise RuntimeError(
-                    "Lock is already held by this process — double acquire?"
-                )
-
-            if self._is_hkb_mcp_process(existing_pid):
-                logger.info(
-                    "Stale hkb-mcp process detected (PID %d) — terminating",
-                    existing_pid,
-                )
-                if not self._terminate_stale(existing_pid):
-                    raise RuntimeError(
-                        f"Could not terminate stale hkb-mcp (PID {existing_pid}). "
-                        f"Kill it manually: kill -9 {existing_pid}"
-                    )
-            else:
-                logger.debug(
-                    "Lock holder PID %d is not hkb-mcp (dead or recycled)",
-                    existing_pid,
-                )
-
-            # Retry once — the flock should now be free.
-            fd = os.open(str(self._path), os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                os.close(fd)
-                raise RuntimeError(
-                    f"Stale recovery failed — lock still held after "
-                    f"terminating PID {existing_pid_str}. "
-                    f"Remove {self._path} manually."
-                )
-
-        # Prevent child processes from inheriting the lock fd.
-        try:
-            import fcntl as _fcntl
-            flags = _fcntl.fcntl(fd, _fcntl.F_GETFD)
-            _fcntl.fcntl(fd, _fcntl.F_SETFD, flags | _fcntl.FD_CLOEXEC)
-        except OSError:
-            pass
-
-        # Write our PID so a blocked instance can report it.
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, str(os.getpid()).encode("ascii"))
-
-        self._fd = fd
-
-    def release(self) -> None:
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
 
 
 # Parse CLI args before server creation so lifespan can use them.
@@ -314,7 +111,7 @@ def _start_sync_worker(config, store):
 
 
 def _check_for_update() -> str:
-    """Non-blocking check for newer git tags. Returns 'vOLD → vNEW' or empty string."""
+    """Blocking check for newer git tags (run in a background thread). Returns 'vOLD → vNEW' or empty string."""
     import subprocess
     try:
         # Find the repo root from this file's location
@@ -365,7 +162,7 @@ def _connect_with_retry(store: "KnowledgeStore") -> None:
     delay = _DB_CONNECT_BACKOFF
     for attempt in range(1, _DB_CONNECT_RETRIES + 1):
         try:
-            store.db.connect()
+            store.recover_index()
             store.sync_entry_links()
             return
         except sqlite3.OperationalError as e:
@@ -379,69 +176,59 @@ def _connect_with_retry(store: "KnowledgeStore") -> None:
             delay = min(delay * 2, 30)
 
 
-@asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Initialize KnowledgeStore on startup, close on shutdown.
-
-    Auto-creates the KB with sensible defaults if it doesn't exist yet,
-    so the MCP server "just works" on first launch without requiring
-    a prior ``hkb init``.
-
-    Acquires a process-level exclusive lock (``server.lock``) to prevent
-    multiple hkb-mcp instances from sharing the same KB simultaneously.
-    """
-    args = _server_args or _parse_server_args([])
-
-    # Determine hkb_dir and acquire process lock BEFORE config load.
-    if args.path is not None:
-        hkb_dir = Path(args.path).resolve() / ".hkb"
-    else:
-        hkb_dir = Path.home() / ".hkb"
-    hkb_dir.mkdir(parents=True, exist_ok=True)
-
-    lock = _ServerLock(hkb_dir)
-    lock.acquire()
-    try:
-        # Lightweight update check (non-blocking, skips silently on failure)
-        update_msg = _check_for_update()
-
+def _open_store(args):
+    from .locking import storage_lock
+    root = Path(args.path).expanduser().resolve() if args.path is not None else Path.home()
+    with storage_lock(root / ".hkb" / "storage"):
+        fresh = False
         try:
             config = KBConfig.load(args.path)
         except FileNotFoundError:
-            # Auto-init: create KB with embeddings disabled (lightweight default)
-            logger.info("KB not found — auto-initializing at %s", args.path or "~/.hkb/")
-            if args.path is None:
-                root = str(Path.home())
-            else:
-                root = str(Path(args.path).resolve())
-            config = KBConfig(root=root)
-            store = KnowledgeStore(config)
-            store.init()
-            _connect_with_retry(store)
-            health = store.health_snapshot()
-            worker = _start_sync_worker(config, store)
-            try:
-                yield AppContext(store=store, health=health, sync_worker=worker,
-                                 update_available=update_msg)
-            finally:
-                if worker:
-                    worker.stop()
-                store.close()
-            return
-
+            config = KBConfig(root=str(root))
+            fresh = True
         store = KnowledgeStore(config)
-        _connect_with_retry(store)
-        health = store.health_snapshot()
-        worker = _start_sync_worker(config, store)
         try:
-            yield AppContext(store=store, health=health, sync_worker=worker,
-                             update_available=update_msg)
-        finally:
-            if worker:
-                worker.stop()
+            if fresh:
+                store.init()
+            _connect_with_retry(store)
+            return AppContext(store=store, health=store.health_snapshot(),
+                              sync_worker=_start_sync_worker(config, store))
+        except BaseException:
             store.close()
+            raise
+
+
+def _close_store(app_ctx):
+    if app_ctx.sync_worker:
+        app_ctx.sync_worker.stop()
+        app_ctx.sync_worker.join()
+    app_ctx.store.close()
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+    """Each stdio client owns a session; shared storage serializes mutations.
+
+    Blocking work is drained before shutdown closes the database. Startup and
+    update checks run off the event loop so protocol handling remains responsive.
+    """
+    args = _server_args or _parse_server_args([])
+    app_ctx = await anyio.to_thread.run_sync(_open_store, args)
+    app_ctx.tool_limiter = anyio.CapacityLimiter(4)
+
+    async def check_update():
+        app_ctx.update_available = await anyio.to_thread.run_sync(_check_for_update)
+
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(check_update)
+            try:
+                yield app_ctx
+            finally:
+                tasks.cancel_scope.cancel()
     finally:
-        lock.release()
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(_close_store, app_ctx)
 
 
 SERVER_INSTRUCTIONS = """\
@@ -471,6 +258,29 @@ TOOLS:
 """
 
 mcp_server = FastMCP(f"hyperkb v{__version__}", instructions=SERVER_INSTRUCTIONS, lifespan=app_lifespan)
+
+
+def _blocking_tool():
+    """Register an async adapter while keeping the Python helper synchronous."""
+    def register(fn):
+        signature = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        async def dispatch(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            ctx = bound.arguments.get("ctx")
+            app_ctx = ctx.request_context.lifespan_context
+            if app_ctx.tool_limiter is None:
+                app_ctx.tool_limiter = anyio.CapacityLimiter(4)
+            # Do not abandon an in-flight write on cancellation: cleanup must
+            # wait for it to finish before closing its store connection.
+            return await anyio.to_thread.run_sync(
+                functools.partial(fn, *args, **kwargs), limiter=app_ctx.tool_limiter,
+            )
+
+        mcp_server.tool()(dispatch)
+        return fn
+    return register
 
 
 def _get_store(ctx: Context) -> KnowledgeStore:
@@ -536,10 +346,10 @@ def _apply_anchor_boost(results: list, anchor_files: dict, boost: float = 1.5, k
 # Tools (10 consolidated tools with sub-actions)
 # ---------------------------------------------------------------------------
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_search(
     query: str = "",
-    mode: str = "hybrid",
+    mode: Literal['hybrid', 'rg', 'bm25', 'recent', 'check'] = "hybrid",
     top: int = 10,
     domain: str = "",
     after: str = "",
@@ -573,6 +383,8 @@ def hkb_search(
         mode=recent: JSON array of {epoch, content, file_name, type, ...}.
         mode=check: JSON array of routing candidates with scores.
     """
+    if mode not in ('hybrid', 'rg', 'bm25', 'recent', 'check'):
+        return json.dumps({"status": "error", "message": "mode must be one of: hybrid, rg, bm25, recent, check."})
     store = _get_store(ctx)
     top = max(1, min(top, 500))
     offset = max(0, offset)
@@ -667,7 +479,7 @@ def hkb_search(
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_show(
     name: str = "",
     after: str = "",
@@ -753,7 +565,7 @@ def hkb_show(
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_add(
     content: str = "",
     to: str = "",
@@ -806,11 +618,11 @@ def hkb_add(
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_update(
     file: str = "",
     epoch: int = 0,
-    action: str = "update",
+    action: Literal['update', 'archive', 'batch'] = "update",
     new_content: str = "",
     set_status: str = "",
     add_tags: str = "",
@@ -828,12 +640,14 @@ def hkb_update(
         set_status: Change status (action=update).
         add_tags: Tags to add (action=update).
         remove_tags: Tags to remove (action=update).
-        updates: JSON array for action=batch. Each: {file, epoch, set_status?, add_tags?, remove_tags?}.
+        updates: JSON array for action=batch (up to 50 processed; skipped count returned). Each: {file, epoch, set_status?, add_tags?, remove_tags?}.
 
     Returns:
         update/archive: JSON {status, file, epoch}.
-        batch: JSON {status, updated, failed, results[]}.
+        batch: JSON {status, updated, failed, requested, processed, skipped, truncated, results[]}.
     """
+    if action not in ('update', 'archive', 'batch'):
+        return json.dumps({"status": "error", "message": "action must be one of: update, archive, batch."})
     store = _get_store(ctx)
     try:
         if action == "archive":
@@ -873,6 +687,7 @@ def _do_batch_update(store, updates_json: str) -> str:
         return json.dumps({"status": "error", "message": "Updates must be a JSON array."})
     if len(items) == 0:
         return json.dumps({"status": "error", "message": "Updates array is empty."})
+    requested = len(items)
     items = items[:50]
     results = []
     updated = 0
@@ -908,7 +723,12 @@ def _do_batch_update(store, updates_json: str) -> str:
             results.append({"file": f, "epoch": ep, "status": "error", "message": str(e)})
             failed += 1
     overall = "ok" if failed == 0 else ("partial" if updated > 0 else "error")
-    return json.dumps({"status": overall, "updated": updated, "failed": failed, "results": results}, indent=2)
+    skipped = requested - len(items)
+    if skipped and overall == "ok":
+        overall = "partial"
+    return json.dumps({"status": overall, "updated": updated, "failed": failed,
+                       "requested": requested, "processed": len(items), "skipped": skipped,
+                       "truncated": bool(skipped), "results": results}, indent=2)
 
 
 def _parse_duration_seconds(value: str) -> int:
@@ -929,9 +749,9 @@ def _parse_duration_seconds(value: str) -> int:
         )
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_session(
-    action: str = "briefing",
+    action: Literal['briefing', 'review', 'anchor'] = "briefing",
     domain: str = "",
     after: str = "",
     before: str = "",
@@ -962,6 +782,8 @@ def hkb_session(
         review: JSON with grouped entries, diagnostics, distributions.
         anchor: JSON with active anchors and anchored files.
     """
+    if action not in ('briefing', 'review', 'anchor'):
+        return json.dumps({"status": "error", "message": "action must be one of: briefing, review, anchor."})
     store = _get_store(ctx)
     try:
         if action == "anchor":
@@ -1298,7 +1120,7 @@ def _enrich_fix_hints(checks: list[dict]) -> None:
         elif name == "orphan_entry_links":
             cmds.append("hkb_health(fix=True)")
         elif name in ("db_vs_disk_file_count", "disk_db_entry_drift"):
-            cmds.append("hkb_reindex()")
+            cmds.append('hkb_health(action="reindex")')
         elif name == "empty_files":
             files = details[0].get("files", []) if details else []
             for f in files[:_MAX_FIX_COMMANDS]:
@@ -1307,7 +1129,7 @@ def _enrich_fix_hints(checks: list[dict]) -> None:
             for d in details[:_MAX_FIX_COMMANDS]:
                 target = d.get("target_file") or d.get("target", "")
                 if target:
-                    cmds.append(f'hkb_create(name="{target}", description="...", keywords=["..."])')
+                    cmds.append(f'hkb_add(create_file=True, to="{target}", description="...", keywords=["..."])')
         elif name == "self_links":
             seen = set()
             for d in details:
@@ -1321,21 +1143,21 @@ def _enrich_fix_hints(checks: list[dict]) -> None:
             for d in details[:_MAX_FIX_COMMANDS]:
                 f = d.get("file_name", "")
                 ep = d.get("epoch", 0)
-                cmds.append(f'hkb_archive(name="{f}", epoch={ep})')
+                cmds.append(f'hkb_update(action="archive", file="{f}", epoch={ep})')
         elif name == "compaction_readiness":
             for d in details[:_MAX_FIX_COMMANDS]:
                 f = d.get("file", "")
-                cmds.append(f'hkb_compact(name="{f}")')
+                cmds.append(f'hkb_health(action="compact", file="{f}", dry_run=True)')
         elif name == "stale_active":
             for d in details[:_MAX_FIX_COMMANDS]:
                 f = d.get("file", d.get("file_name", ""))
                 ep = d.get("epoch", 0)
-                cmds.append(f'hkb_update(name="{f}", epoch={ep}, set_status="resolved") # or superseded')
+                cmds.append(f'hkb_update(file="{f}", epoch={ep}, set_status="resolved") # or superseded')
         elif name == "untagged_entries":
             for d in details[:_MAX_FIX_COMMANDS]:
                 f = d.get("file", d.get("file_name", ""))
                 ep = d.get("epoch", 0)
-                cmds.append(f'hkb_update(name="{f}", epoch={ep}, add_tags="...")')
+                cmds.append(f'hkb_update(file="{f}", epoch={ep}, add_tags="...")')
         elif name == "potential_duplicates":
             for d in details[:_MAX_FIX_COMMANDS]:
                 f = d.get("file", "")
@@ -1348,9 +1170,9 @@ def _enrich_fix_hints(checks: list[dict]) -> None:
         c["fix_commands"] = cmds
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_health(
-    action: str = "check",
+    action: Literal['check', 'reindex', 'compact'] = "check",
     checks: str = "all",
     fix: bool = False,
     file: str = "",
@@ -1377,6 +1199,8 @@ def hkb_health(
         reindex: JSON {status, message}.
         compact: JSON with cluster analysis or compaction results.
     """
+    if action not in ('check', 'reindex', 'compact'):
+        return json.dumps({"status": "error", "message": "action must be one of: check, reindex, compact."})
     store = _get_store(ctx)
     try:
         if action == "reindex":
@@ -1433,9 +1257,9 @@ def hkb_health(
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_task(
-    action: str = "list",
+    action: Literal['create', 'show', 'update', 'list'] = "list",
     title: str = "",
     description: str = "",
     file: str = "",
@@ -1446,6 +1270,8 @@ def hkb_task(
     note: str = "",
     domain: str = "",
     ctx: Context = None,
+    top: int = 100,
+    offset: int = 0,
 ) -> str:
     """Task lifecycle: create, show, update, or list tasks.
 
@@ -1460,6 +1286,8 @@ def hkb_task(
         status: For update: new status. For list: filter (default "pending,in_progress,blocked").
         note: For update: note to append.
         domain: For list: namespace filter.
+        top: For list: page size (default 100, maximum 500).
+        offset: For list: number of matching tasks to skip.
 
     Returns:
         create: JSON {status, file, epoch}.
@@ -1467,6 +1295,8 @@ def hkb_task(
         update: JSON {status, file, epoch}.
         list: JSON {_summary, tasks[]}.
     """
+    if action not in ('create', 'show', 'update', 'list'):
+        return json.dumps({"status": "error", "message": "action must be one of: create, show, update, list."})
     store = _get_store(ctx)
     try:
         if action == "create":
@@ -1480,7 +1310,7 @@ def hkb_task(
                 return json.dumps({"status": "error", "message": "file and epoch required for update"})
             return _do_task_update(store, file, epoch, status, note)
         # Default: list
-        return _do_task_list(store, file, status or "pending,in_progress,blocked", domain)
+        return _do_task_list(store, file, status or "pending,in_progress,blocked", domain, top, offset)
     except ValueError as e:
         return json.dumps({"status": "error", "message": str(e)})
     except Exception as e:
@@ -1557,7 +1387,7 @@ def _do_task_update(store, file, epoch, status, note):
     return json.dumps(result)
 
 
-def _do_task_list(store, file, status, domain):
+def _do_task_list(store, file, status, domain, top=100, offset=0):
     tasks = store.db.get_tasks(status_filter=status, file_name=file, domain=domain)
     output = [
         {"epoch": t["epoch"], "content": t["content"], "file_name": t["file_name"],
@@ -1569,7 +1399,14 @@ def _do_task_list(store, file, status, domain):
         s = t["status"]
         if s in summary:
             summary[s] += 1
-    return json.dumps({"_summary": summary, "tasks": output}, indent=2)
+    top = max(1, min(top, 500))
+    offset = max(0, offset)
+    total = len(output)
+    page = output[offset:offset + top]
+    has_more = offset + len(page) < total
+    return json.dumps({"_summary": summary, "tasks": page, "total": total,
+                       "offset": offset, "has_more": has_more,
+                       "next_offset": offset + len(page) if has_more else None}, indent=2)
 
 
 def _get_sync_engine(ctx: Context):
@@ -1599,13 +1436,13 @@ def _get_sync_engine(ctx: Context):
         return None
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_sync(
-    action: str = "both",
+    action: Literal['push', 'pull', 'both', 'status', 'config', 'conflicts'] = "both",
     dry_run: bool = False,
     key: str = "",
     value: str = "",
-    conflict_action: str = "list",
+    conflict_action: Literal["list", "clear"] = "list",
     ctx: Context = None,
 ) -> str:
     """Sync operations: push/pull, status, config, conflicts.
@@ -1623,12 +1460,21 @@ def hkb_sync(
         config: JSON with settings or confirmation.
         conflicts: JSON with conflict list or clear confirmation.
     """
+    if action not in ('push', 'pull', 'both', 'status', 'config', 'conflicts'):
+        return json.dumps({"status": "error", "message": "action must be one of: push, pull, both, status, config, conflicts."})
     store = _get_store(ctx)
     try:
         if action == "status":
             return _do_sync_status(store, ctx)
         if action == "config":
-            return _do_sync_config(store, key, value)
+            result = _do_sync_config(store, key, value)
+            if key and json.loads(result).get("status") == "ok":
+                app_ctx = ctx.request_context.lifespan_context
+                if app_ctx.sync_worker:
+                    app_ctx.sync_worker.stop()
+                    app_ctx.sync_worker.join()
+                app_ctx.sync_worker = _start_sync_worker(store.config, store)
+            return result
         if action == "conflicts":
             return _do_sync_conflicts(ctx, conflict_action)
         # push/pull/both
@@ -1661,7 +1507,8 @@ def _do_sync_status(store, ctx):
             result["engine_error"] = str(e)
     app_ctx = ctx.request_context.lifespan_context
     worker = app_ctx.sync_worker
-    result["worker_running"] = worker is not None and worker.is_running if worker else False
+    result["worker_running"] = bool(worker and worker.is_running)
+    result["worker_is_leader"] = bool(worker and getattr(worker, "is_leader", False))
     return json.dumps(result, indent=2)
 
 
@@ -1682,15 +1529,7 @@ def _do_sync_config(store, key, value):
         return json.dumps({"status": "error", "message": f"Only sync_* keys can be set via this tool. Got: {key}"})
     if not hasattr(config, key):
         return json.dumps({"status": "error", "message": f"Unknown sync config key: {key}"})
-    current = getattr(config, key)
-    if isinstance(current, bool):
-        value = value.lower() in ("true", "1", "yes")
-    elif isinstance(current, int):
-        value = int(value)
-    elif isinstance(current, float):
-        value = float(value)
-    setattr(config, key, value)
-    config.save()
+    value = config.set_value(key, value)
     display_value = value
     from .crypto import is_sensitive_field
     if is_sensitive_field(key):
@@ -1699,6 +1538,8 @@ def _do_sync_config(store, key, value):
 
 
 def _do_sync_conflicts(ctx, conflict_action):
+    if conflict_action not in ("list", "clear"):
+        return json.dumps({"status": "error", "message": "conflict_action must be list or clear."})
     engine = _get_sync_engine(ctx)
     if engine is None:
         store = _get_store(ctx)
@@ -1715,10 +1556,10 @@ def _do_sync_conflicts(ctx, conflict_action):
         return json.dumps({"status": "error", "message": "conflict_action must be 'list' or 'clear'."})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_context(
     topic: str,
-    mode: str = "packed",
+    mode: Literal['packed', 'suggest', 'narrative'] = "packed",
     max_tokens: int = 4000,
     domain: str = "",
     depth: str = "deep",
@@ -1746,6 +1587,8 @@ def hkb_context(
         suggest: JSON with suggestions[].
         narrative: JSON with timeline[].
     """
+    if mode not in ('packed', 'suggest', 'narrative'):
+        return json.dumps({"status": "error", "message": "mode must be one of: packed, suggest, narrative."})
     store = _get_store(ctx)
     try:
         if mode == "suggest":
@@ -1775,16 +1618,16 @@ def hkb_context(
         if depth not in ("deep", "shallow"):
             depth = "deep"
         result = store.build_context(topic=topic, max_tokens=max_tokens, domain=domain, depth=depth)
-        anchor_files = _get_anchor_files(ctx)
-        _apply_anchor_boost(result.get("entries", []), anchor_files, key="file_name")
+        # Preserve the complete response budget measured by build_context;
+        # adding anchor flags or changing scores after packing changes its size.
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-@mcp_server.tool()
+@_blocking_tool()
 def hkb_view(
-    action: str = "list",
+    action: Literal['set', 'list'] = "list",
     name: str = "",
     files: list[str] = [],
     description: str = "",
@@ -1802,6 +1645,8 @@ def hkb_view(
         set: JSON {status, name, files, description}.
         list: JSON with views[] or single view details.
     """
+    if action not in ('set', 'list'):
+        return json.dumps({"status": "error", "message": "action must be one of: set, list."})
     store = _get_store(ctx)
     try:
         if action == "set":
@@ -1827,21 +1672,28 @@ def hkb_view(
 # Entry point
 # ---------------------------------------------------------------------------
 
+async def _run_stdio():
+    async with anyio.create_task_group() as tasks:
+        async def receive_signals():
+            with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
+                async for _ in signals:
+                    tasks.cancel_scope.cancel()
+                    break
+
+        tasks.start_soon(receive_signals)
+        try:
+            await mcp_server.run_stdio_async()
+        finally:
+            tasks.cancel_scope.cancel()
+
+
 def main(argv: list[str] | None = None):
     """CLI entry point for the MCP server."""
     global _server_args
     _server_args = _parse_server_args(argv)
 
-    # Handle SIGTERM/SIGINT gracefully — Claude Code sends SIGTERM on exit.
-    # sys.exit() from a signal handler doesn't work reliably inside
-    # asyncio's event loop, so we use os._exit() for an immediate clean
-    # exit.  The DB connection is cleaned up by the OS; markdown files
-    # (the source of truth) are already flushed on every write.
-    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
-    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
-
     try:
-        mcp_server.run(transport="stdio")
+        anyio.run(_run_stdio)
     except KeyboardInterrupt:
         pass
     except SystemExit:

@@ -22,8 +22,9 @@ class TestInit:
 
     def test_store_write_lock_is_timeout_lock(self, kb_store):
         """Store write lock must be a TimeoutLock, not a bare threading.Lock."""
-        assert isinstance(kb_store._write_lock, TimeoutLock)
-        assert kb_store._write_lock._timeout == 60
+        from hyperkb.locking import FileLock
+        assert isinstance(kb_store._write_lock, FileLock)
+        assert kb_store._write_lock.timeout == 60
 
 
 class TestCreateFile:

@@ -1,0 +1,2 @@
+# Build-time only. Published documentation is static HTML.
+Markdown==3.5.2

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HyperKB — Pick up where your last session left off</title>
+  <meta name="description" content="Persistent, searchable memory for your AI tools. Keep findings, decisions, and tasks in Markdown you own. Connect with MCP and carry useful context into your next session.">
+  <meta name="theme-color" content="#0b1115">
+  <link rel="canonical" href="https://hyperkb.com/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="HyperKB — Pick up where your last session left off">
+  <meta property="og:description" content="Your tools change. Your knowledge stays. Persistent Markdown memory for MCP clients.">
+  <meta property="og:url" content="https://hyperkb.com/">
+  <link rel="icon" href="mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" type="text/plain" href="llms.txt" title="Project reference for agents">
+  <script defer src="site.js"></script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-2JQ5F1X1L0"></script>
+  <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js',new Date());gtag('config','G-2JQ5F1X1L0');</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"HyperKB","description":"Persistent Markdown knowledge base with hybrid search and an MCP interface.","url":"https://hyperkb.com/","codeRepository":"https://github.com/calvincs/hyperkb","programmingLanguage":"Python","license":"https://opensource.org/license/mit"}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header wrap">
+  <a class="brand" href="index.html" aria-label="HyperKB home"><img src="mark.svg" width="31" height="31" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a>
+  <nav aria-label="Main navigation"><a href="#how-it-works">How it works</a><a href="docs/index.html">Documentation</a><a href="llms.txt" class="agent-link">For agents <span aria-hidden="true">↗</span></a></nav>
+  <a class="github-link" href="https://github.com/calvincs/hyperkb">GitHub <span aria-hidden="true">↗</span></a>
+</header>
+<main id="main">
+<section class="hero wrap" aria-labelledby="hero-title">
+  <div class="hero-copy">
+    <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> OPEN SOURCE · MCP NATIVE · YOUR FILES</p>
+    <h1 id="hero-title">Your next session.<br><span class="muted-heading">A little less</span><br>starting over.</h1>
+    <p class="hero-description">Keep the findings, decisions, and hard-won context your AI would otherwise forget. HyperKB turns them into connected, searchable memory you own.</p>
+    <div class="actions"><a class="button primary" href="#start">Give your agent a memory <span aria-hidden="true">↗</span></a><a class="text-link" href="#how-it-works">See the idea in motion <span aria-hidden="true">↓</span></a></div>
+    <div class="hero-footnote"><span>Plain Markdown</span><span>Local search</span><span>Any MCP client</span></div>
+  </div>
+  <div class="memory-demo" data-memory-demo>
+    <div class="demo-top"><span><span class="status-dot" aria-hidden="true"></span> A FINDING, REMEMBERED</span><span class="demo-label">Illustrative workflow</span></div>
+    <div class="demo-toolbar"><div class="step-tabs" aria-label="Memory walkthrough"><button type="button" class="active" data-step="0" aria-pressed="true"><span>01</span> Record</button><button type="button" data-step="1" aria-pressed="false"><span>02</span> Keep</button><button type="button" data-step="2" aria-pressed="false"><span>03</span> Recall</button></div><button class="motion-toggle" type="button" aria-label="Pause animation" data-motion>Pause <span aria-hidden="true">Ⅱ</span></button></div>
+    <div class="demo-canvas" data-stage="0">
+      <div class="client-pill"><span class="client-icon" aria-hidden="true">›_</span><div><small>CLIENT A · TODAY</small><strong data-client-title>One useful discovery</strong></div><span class="mini-tag">MCP</span></div>
+      <div class="flow-track" aria-hidden="true"><span></span><i></i><span></span></div>
+      <div class="memory-file"><div class="file-bar"><span class="file-icon" aria-hidden="true">≡</span><strong>infra.postgres.md</strong><span class="saved-badge">SAVED</span></div><div class="file-content"><span class="code-dim">&gt;&gt;&gt; 1789142400</span><br><span class="code-key">@type:</span> decision<br><span class="code-key">@tags:</span> connection-pool<br><br>Use a pool limit of 20.<br><span class="file-highlight">Higher limits exhaust our worker budget.</span><br><br><span class="wiki-link">[[app.performance]]</span><br><span class="code-dim">&lt;&lt;&lt;</span></div></div>
+      <div class="index-trail" aria-hidden="true"><span>.md</span><span class="trail-line"></span><span>SQLite + ripgrep</span><span class="trail-line"></span><span>MCP</span></div>
+      <div class="recall-card"><div class="recall-heading"><span class="status-dot" aria-hidden="true"></span><small data-recall-heading>READY FOR THE NEXT SESSION</small></div><p data-recall-text>The reason stays with the decision.</p></div>
+    </div>
+    <div class="demo-caption"><span class="caption-index" data-caption-index>01 / 03</span><p data-caption>Record what you learned, together with why it matters.</p><span class="caption-progress" aria-hidden="true"><i></i></span></div>
+    <noscript><p class="no-script-note">Record a finding through MCP. Keep it in a Markdown file. In your next session, search for the decision and retrieve its original context.</p></noscript>
+  </div>
+</section>
+<div class="principles wrap"><p>Good context shouldn't depend on <strong>one conversation.</strong></p><div><span>01 <strong>Readable by you</strong></span><span>02 <strong>Useful to your agent</strong></span><span>03 <strong>Portable by design</strong></span></div></div>
+<section class="section wrap" id="how-it-works" aria-labelledby="flow-title">
+  <div class="section-heading"><p class="eyebrow">FROM A MOMENT TO A MEMORY</p><h2 id="flow-title">Keep the insight.<br><span class="muted-heading">Bring back the context.</span></h2><p>HyperKB gives an agent a place to put what matters—and a way to find it again when the work calls for it.</p></div>
+  <div class="workflow-grid">
+    <article class="workflow"><span class="number">01 / CAPTURE</span><h3>Write the useful part.</h3><p>A finding, a decision and its rationale, or a task for later. Add a topic, a status, and links to related knowledge.</p><div class="example-code"><span class="code-key">hkb_add</span>(<br> &nbsp;to=<span class="code-string">"infra.postgres"</span>,<br> &nbsp;content=<span class="code-string">"@type: decision\n…"</span><br>)</div></article>
+    <article class="workflow"><span class="number">02 / CONNECT</span><h3>Give it a place.</h3><p>Dotted filenames organize topics. Wiki-links connect related ideas. The Markdown is yours to read, back up, and move.</p><div class="topic-map" aria-label="infra.postgres links to app.performance and ops.runbooks"><span class="topic central">infra.postgres</span><div class="topic-connectors" aria-hidden="true"><i></i><i></i></div><div class="topic-row"><span class="topic">app.performance</span><span class="topic">ops.runbooks</span></div></div></article>
+    <article class="workflow"><span class="number">03 / RETRIEVE</span><h3>Find the right context.</h3><p>Search with ripgrep and BM25 ranking, build a session briefing, or pack relevant entries into an estimated context budget.</p><div class="result-preview"><small>QUERY</small><span>“Why is our pool limited to 20?”</span><div><span class="result-indicator" aria-hidden="true">↳</span><strong>infra.postgres</strong><span class="mini-tag">decision</span></div><p>The decision and its original rationale, together.</p></div></article>
+  </div>
+</section>
+<section class="ownership-section" aria-labelledby="ownership-title"><div class="wrap ownership-grid"><div><p class="eyebrow">USEFUL MEMORY. ORDINARY FILES.</p><h2 id="ownership-title">Your tools change.<br><span class="accent">Your knowledge stays.</span></h2><p>Keep a knowledge base outside your conversations. Connect your MCP clients to it, carry it between machines, and read it without an AI tool at all.</p><a class="text-link" href="docs/understanding.html">Understand the storage model <span aria-hidden="true">↗</span></a></div><div class="ownership-list"><article><span aria-hidden="true">01</span><div><h3>Markdown is the source.</h3><p>Your knowledge lives in named text files. SQLite is an index you can rebuild.</p></div></article><article><span aria-hidden="true">02</span><div><h3>Each client has its own session.</h3><p>Local MCP clients share the knowledge base while keeping their focus and provenance separate.</p></div></article><article><span aria-hidden="true">03</span><div><h3>Sync is a choice.</h3><p>Work locally, or configure Git-backed synchronization through your own S3-compatible storage.</p></div></article></div></div></section>
+<section class="section wrap" id="start" aria-labelledby="start-title"><div class="start-grid"><div class="section-heading"><p class="eyebrow">MAKE THE NEXT SESSION BETTER</p><h2 id="start-title">Start with one<br>useful memory.</h2><p>Install HyperKB, connect your MCP client, and save a decision worth remembering. No model API key is needed for local search.</p><div class="requirements"><span>Python 3.10+</span><span>ripgrep</span><span>MCP client</span></div><a class="text-link" href="docs/getting-started.html">Complete setup guide <span aria-hidden="true">↗</span></a></div><div class="install-terminal"><div class="terminal-bar"><span><i></i><i></i><i></i></span><span>INSTALL / TERMINAL</span><button type="button" class="copy-button" data-copy="install-code" aria-label="Copy installation commands">Copy</button></div><pre id="install-code"><code>git clone https://github.com/calvincs/hyperkb
+cd hyperkb
+python3 -m venv .venv
+.venv/bin/pip install -e ".[mcp]"
+.venv/bin/hkb init</code></pre><div class="terminal-note">Install <strong>ripgrep</strong> with your system package manager, then register the absolute path to <code>hkb-mcp</code> in your client.</div><a href="docs/mcp.html" class="terminal-next">Next: connect your MCP client <span aria-hidden="true">→</span></a><span class="copy-status" role="status" aria-live="polite"></span></div></div></section>
+<section class="guides-section wrap" id="guides" aria-labelledby="guides-title"><div class="guide-heading"><div><p class="eyebrow">A SHORTER PATH TO UNDERSTANDING</p><h2 id="guides-title">Read it your way.</h2></div><a class="text-link" href="docs/index.html">All documentation <span aria-hidden="true">↗</span></a></div><div class="guide-grid"><a class="guide-card" href="docs/getting-started.html"><span class="number">START HERE</span><h3>Your first knowledge base <span aria-hidden="true">↗</span></h3><p>Install, connect, and save your first entry.</p></a><a class="guide-card" href="docs/workflows.html"><span class="number">BUILD A HABIT</span><h3>Everyday workflows <span aria-hidden="true">↗</span></h3><p>Briefings, decisions, tasks, and focused context.</p></a><a class="guide-card" href="llm.txt"><span class="number">FOR YOUR AGENT</span><h3>The short agent guide <span aria-hidden="true">↗</span></h3><p>Plain-text instructions and links to the full reference.</p></a></div></section>
+</main>
+<footer class="site-footer wrap"><a class="brand" href="index.html"><img src="mark.svg" width="26" height="26" alt=""><span>hyper<span class="brand-light">kb</span><span class="brand-dot">.</span></span></a><p>A little less starting over.</p><nav aria-label="Footer navigation"><a href="https://github.com/calvincs/hyperkb">Source</a><a href="docs/index.html">Docs</a><a href="license.html">MIT license</a><a href="llms.txt">llms.txt</a></nav></footer>
+</body>
+</html>

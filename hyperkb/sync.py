@@ -1,22 +1,18 @@
-"""Multi-machine sync for hyperkb via git locally + S3 remotely.
+"""Multi-machine sync with local Git history and immutable S3 snapshots.
 
-Git provides change tracking, diffing, and three-way merge.
-S3 provides simple remote storage. Periodic squashing prevents .git bloat.
-
-Architecture:
-    ~/.hkb/storage/  (local git repo)
-    S3 bucket/       (remote storage mirror + sync metadata)
-
-Sync flow:
-    1. LOCK    - Acquire S3 advisory lock
-    2. DETECT  - Local changes via git diff, remote via manifest
-    3. PULL    - Download remote → temp branch → git merge
-    4. PUSH    - Upload merged state to S3
-    5. FINALIZE - Tag sync point, squash old history, release lock
-    6. REINDEX  - Rebuild SQLite from merged files
+A shared storage lock serializes store mutations, snapshot publication, Git and
+reindexing across local processes. One background worker holds the leader lock;
+remote operations additionally require a unique, renewable conditional S3 lease.
+Remote baselines are persisted separately from Git tags so pull-only operations
+never acknowledge pending uploads. Downloads are staged and hash checked before
+complete-file three-way merging and atomic publication into live storage.
 """
 
 import json
+import base64
+import hashlib
+import tempfile
+from contextlib import contextmanager
 import logging
 import os
 import shutil
@@ -26,6 +22,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from .locking import storage_lock, FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +75,12 @@ class GitRepo:
     def init(self) -> None:
         """Initialize git repo in storage dir if not already done."""
         if self.is_initialized():
+            self._ignore_coordination_files()
             self._initialized = True
             return
 
         self._run(["init"])
+        self._ignore_coordination_files()
 
         # Configure git user for commits (local only, doesn't affect global)
         self._run(["config", "user.email", "hyperkb@local"])
@@ -102,6 +102,16 @@ class GitRepo:
         # Tag initial sync point
         self._run(["tag", self.SYNC_TAG])
         self._initialized = True
+
+    def _ignore_coordination_files(self):
+        exclude = self.storage_dir / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text() if exclude.exists() else ""
+        additions = [pattern for pattern in (".hkb-storage.lock", ".sync-*")
+                     if pattern not in existing.splitlines()]
+        if additions:
+            with exclude.open("a") as stream:
+                stream.write("\n" + "\n".join(additions) + "\n")
 
     def auto_commit(self, files: list[str], message: str) -> bool:
         """Commit specific files after a store write operation.
@@ -273,14 +283,11 @@ class GitRepo:
 
 
 class SyncEngine:
-    """Orchestrates push/pull/merge operations between local git and S3 remote.
+    """Synchronize a locked storage snapshot against a versioned remote manifest.
 
-    Sync flow:
-        1. Acquire S3 lock
-        2. Detect local + remote changes
-        3. Pull remote changes → temp branch → git merge
-        4. Push merged state to S3
-        5. Update sync tag, squash history, release lock
+    Acquire the remote lease before reading inventory, stage remote downloads,
+    merge against the last observed per-target baseline, publish atomically and
+    reindex, then upload pending changes and acknowledge the resulting inventory.
     """
 
     def __init__(
@@ -300,6 +307,8 @@ class SyncEngine:
         self._last_sync_status: str = "never"
         self._last_sync_error: str = ""
         self._conflict_log_dir = storage_dir.parent / "sync" / "conflicts"
+        self._remote_settings = self._settings()
+        self._cancel_event = threading.Event()
 
     @property
     def last_sync_time(self) -> float:
@@ -313,28 +322,74 @@ class SyncEngine:
     def last_sync_error(self) -> str:
         return self._last_sync_error
 
+    def _settings(self):
+        return tuple(getattr(self.config, "sync_" + key) for key in (
+            "bucket", "prefix", "region", "endpoint_url", "access_key", "secret_key"))
+
+    def _refresh_config(self):
+        if self.config.config_path.exists():
+            loaded = type(self.config).load(self.config.root)
+            for key, value in vars(loaded).items():
+                if key.startswith("sync_"):
+                    setattr(self.config, key, value)
+        settings = self._settings()
+        if settings != self._remote_settings and self.config.sync_enabled:
+            from .remote import S3Remote
+            self.remote = S3Remote(*settings)
+            self._remote_settings = settings
+
+    def _guard(self):
+        """Check cancellation/configuration and fence each remote operation."""
+        if self._cancel_event.is_set():
+            raise InterruptedError("Sync worker stopped")
+        if self.config.config_path.exists():
+            latest = type(self.config).load(self.config.root)
+            if not latest.sync_enabled or any(
+                getattr(latest, "sync_" + key) != value
+                for key, value in zip(("bucket", "prefix", "region", "endpoint_url",
+                                       "access_key", "secret_key"), self._remote_settings)
+            ):
+                raise InterruptedError("Sync configuration changed; retry with current settings")
+        if not self.config.sync_enabled:
+            raise InterruptedError("Sync disabled")
+        if not self.remote.renew_lock():
+            raise RuntimeError("Remote sync lease lost")
+
+    @contextmanager
+    def _mutation(self):
+        lock = storage_lock(self.storage_dir)
+        deadline = time.monotonic() + 60
+        while not lock.acquire(timeout=0.1):
+            if self._cancel_event.is_set():
+                raise InterruptedError("Sync worker stopped")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Storage is busy")
+        try:
+            yield
+        finally:
+            lock.release()
+
     def setup(self) -> None:
-        """One-time setup: initialize git repo in storage dir."""
-        self.git.init()
+        with storage_lock(self.storage_dir):
+            self.git.init()
 
     def sync(self, direction: str = "both", dry_run: bool = False) -> dict:
-        """Perform a sync operation.
-
-        Args:
-            direction: "push", "pull", or "both" (default).
-            dry_run: If True, detect changes but don't apply.
-
-        Returns:
-            Dict with sync results.
-        """
-        with self._lock:
+        if direction not in ("push", "pull", "both"):
+            raise ValueError("direction must be push, pull, or both")
+        with self._lock, self._mutation():
             try:
-                self.git.init()  # Ensure git is ready
-                self.git.commit_all_pending()  # Commit any uncommitted changes
-
+                self._refresh_config()
+                if not self.config.sync_enabled or self._cancel_event.is_set():
+                    return {"status": "disabled", "direction": direction}
+                self.git.init()
+                self.git.commit_all_pending()
+                dirty = self.storage_dir.parent / "sync" / "reindex-needed"
+                if dirty.exists() and self.reindex_fn:
+                    self.reindex_fn()
+                    dirty.unlink()
                 result = self._do_sync(direction, dry_run)
                 self._last_sync_time = time.time()
-                self._last_sync_status = "ok"
+                self._last_sync_status = "ok" if dry_run else result["status"]
                 self._last_sync_error = ""
                 return result
             except Exception as e:
@@ -343,220 +398,251 @@ class SyncEngine:
                 logger.error("Sync failed: %s", e)
                 raise
 
-    def _do_sync(self, direction: str, dry_run: bool) -> dict:
-        """Internal sync implementation."""
-        # 1. Detect changes
-        local_changes = self.git.get_changed_files()
-        local_changes = [f for f in local_changes if f.endswith(".md")]
+    @staticmethod
+    def _validate_name(name):
+        if (not isinstance(name, str) or not name.endswith(".md") or
+                name.startswith(".") or "/" in name or "\\" in name or
+                "\x00" in name or Path(name).name != name):
+            raise ValueError(f"Unsafe remote filename: {name!r}")
 
-        remote_manifest = self.remote.get_manifest()
-        local_manifest = self._build_local_manifest()
-        remote_changes = self._detect_remote_changes(remote_manifest, local_manifest)
+    @staticmethod
+    def _sha(content):
+        return hashlib.sha256(content).hexdigest() if content is not None else None
 
-        # First sync: if remote is empty, push all local files
-        if not remote_manifest.get("files") and local_manifest:
-            local_changes = list(local_manifest.keys())
+    def _state_path(self):
+        # Baselines belong to a destination, never to credentials or a machine.
+        target = (self.config.sync_bucket, self.config.sync_prefix.rstrip("/"),
+                  self.config.sync_region, self.config.sync_endpoint_url)
+        key = hashlib.sha256(json.dumps(target).encode()).hexdigest()
+        return self.storage_dir.parent / "sync" / ("baseline-" + key + ".json")
 
-        if dry_run:
-            return {
-                "status": "dry_run",
-                "local_changes": local_changes,
-                "remote_changes": list(remote_changes.keys()),
-                "direction": direction,
-            }
+    def _load_baseline(self):
+        path = self._state_path()
+        if not path.exists():
+            # A legacy last-sync tag does not prove an upload completed. Treat
+            # migration as first sync, preserving local and remote additions.
+            return {}
+        data = json.loads(path.read_text())
+        result = {}
+        for name, content in data.items():
+            self._validate_name(name)
+            result[name] = base64.b64decode(content, validate=True)
+        return result
 
-        # 2. Acquire lock
-        lock_acquired = self.remote.acquire_lock()
-        if not lock_acquired:
-            return {
-                "status": "locked",
-                "message": "Another machine is currently syncing. Try again shortly.",
-            }
-
+    @staticmethod
+    def _atomic_write(path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp = tempfile.mkstemp(prefix=".sync-", dir=path.parent)
         try:
-            pushed = []
-            pulled = []
-            conflicts = []
-
-            # 3. Pull (if direction allows)
-            if direction in ("pull", "both") and remote_changes:
-                pull_result = self._pull(remote_changes)
-                pulled = pull_result.get("pulled", [])
-                conflicts = pull_result.get("conflicts", [])
-
-            # 4. Push (if direction allows)
-            if direction in ("push", "both") and local_changes:
-                push_result = self._push(local_changes)
-                pushed = push_result.get("pushed", [])
-
-            # 5. Finalize
-            self.git.update_sync_tag()
-            self.git.squash_if_needed(self.config.sync_squash_threshold)
-
-            # 6. Reindex if we pulled changes
-            if pulled and self.reindex_fn:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+            if os.name != "nt":
+                directory = os.open(path.parent, os.O_RDONLY)
                 try:
-                    self.reindex_fn()
-                except Exception as e:
-                    logger.warning("Post-sync reindex failed: %s", e)
-
-            return {
-                "status": "ok",
-                "pushed": pushed,
-                "pulled": pulled,
-                "conflicts": conflicts,
-                "direction": direction,
-            }
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         finally:
-            self.remote.release_lock()
+            if os.path.exists(temp):
+                os.unlink(temp)
+
+    def _save_baseline(self, baseline):
+        self._atomic_write(self._state_path(), json.dumps({
+            name: base64.b64encode(content).decode("ascii")
+            for name, content in baseline.items()
+        }).encode())
+
+    def _do_sync(self, direction: str, dry_run: bool) -> dict:
+        if not dry_run and not self.remote.acquire_lock():
+            return {"status": "locked", "message": "Another sync holds the remote lease."}
+        try:
+            if not dry_run:
+                self._guard()
+            # Always read inventory after acquiring ownership.
+            remote_manifest = self.remote.get_manifest()
+            from .remote import S3Remote
+            manifest_etag = self.remote.manifest_etag if isinstance(self.remote, S3Remote) else None
+            if (not isinstance(remote_manifest, dict) or type(remote_manifest.get("version", 1)) is not int
+                    or remote_manifest.get("version", 1) not in (1, 2)):
+                raise ValueError("Unsupported remote manifest version")
+            remote_files = remote_manifest.get("files", {})
+            tombstones = remote_manifest.get("tombstones", {})
+            if not isinstance(tombstones, dict):
+                raise ValueError("Invalid remote tombstones")
+            for name, entry in tombstones.items():
+                self._validate_name(name)
+                if not isinstance(entry, dict):
+                    raise ValueError("Invalid remote tombstone")
+            if not isinstance(remote_files, dict):
+                raise ValueError("Invalid remote manifest")
+            for name, entry in remote_files.items():
+                self._validate_name(name)
+                if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+                    raise ValueError(f"Invalid manifest entry: {name}")
+            baseline = self._load_baseline()
+            local = {}
+            for path in self.storage_dir.glob("*.md"):
+                self._validate_name(path.name)
+                if path.is_symlink():
+                    raise ValueError(f"Refusing symlink in storage: {path.name}")
+                local[path.name] = path.read_bytes()
+            for name, entry in tombstones.items():
+                if name not in baseline and name in local and self._sha(local[name]) == entry.get("sha256"):
+                    baseline[name] = local[name]
+            names = sorted(set(local) | set(baseline) | set(remote_files))
+            local_changes = [n for n in names if local.get(n) != baseline.get(n)]
+            remote_changes = [n for n in names if
+                remote_files.get(n, {}).get("sha256") != self._sha(baseline.get(n))]
+            if dry_run:
+                return {"status": "dry_run", "local_changes": local_changes,
+                        "remote_changes": remote_changes, "direction": direction}
+
+            # Download and validate everything before touching live files.
+            incoming = {}
+            with tempfile.TemporaryDirectory(prefix="hkb-sync-") as staging:
+                for name in remote_changes:
+                    if name not in remote_files:
+                        incoming[name] = None
+                        continue
+                    self._guard()
+                    content = (self.remote.download_version(entry_blob)
+                               if (entry_blob := remote_files[name].get("blob"))
+                               else self.remote.download_file(name))
+                    entry = remote_files[name]
+                    if content is None or self._sha(content) != entry["sha256"]:
+                        raise ValueError(f"Download hash mismatch or missing object: {name}")
+                    if "size" in entry and len(content) != entry["size"]:
+                        raise ValueError(f"Download size mismatch: {name}")
+                    (Path(staging) / name).write_bytes(content)
+                    incoming[name] = content
+
+                pulled, deleted, pushed, conflicts = [], [], [], []
+                next_baseline = dict(baseline)
+                desired = dict(local)
+                if direction in ("pull", "both"):
+                    from .conflict import merge_versions
+                    for name in remote_changes:
+                        before, ours, theirs = baseline.get(name), local.get(name), incoming[name]
+                        merged, info = merge_versions(before, ours, theirs, name)
+                        if info:
+                            conflicts.append(info)
+                            self._log_conflict(info)
+                        if merged is None:
+                            desired.pop(name, None)
+                        else:
+                            desired[name] = merged
+                        if theirs is None:
+                            next_baseline.pop(name, None)
+                        else:
+                            next_baseline[name] = theirs
+                    self._guard()
+                    dirty = self.storage_dir.parent / "sync" / "reindex-needed"
+                    if local != desired:
+                        self._atomic_write(dirty, b"reindex needed\n")
+                    for name in sorted(set(local) | set(desired)):
+                        if local.get(name) == desired.get(name):
+                            continue
+                        if name in desired:
+                            self._atomic_write(self.storage_dir / name, desired[name])
+                            pulled.append(name)
+                        else:
+                            (self.storage_dir / name).unlink()
+                            deleted.append(name)
+                    if pulled or deleted:
+                        self.git.commit_all_pending("sync: apply remote changes")
+                        # Index every disk change, including deletion-only pulls.
+                        if self.reindex_fn:
+                            self.reindex_fn()
+                            dirty.unlink()
+                    self._save_baseline(next_baseline)
+
+                if direction in ("push", "both"):
+                    changes = [n for n in sorted(set(desired) | set(next_baseline))
+                               if desired.get(n) != next_baseline.get(n)]
+                    # Push alone must not clobber concurrent changes unseen locally.
+                    blocked = [n for n in changes if direction == "push" and
+                               n in remote_changes and self._sha(desired.get(n)) !=
+                               remote_files.get(n, {}).get("sha256")]
+                    if blocked:
+                        raise RuntimeError("Concurrent remote changes; run sync both: " + ", ".join(blocked))
+                    manifest = dict(remote_manifest)
+                    inventory = dict(remote_files)
+                    deleted_inventory = dict(tombstones)
+                    if changes and not remote_manifest.get("version") and not remote_files:
+                        self._guard()
+                        # Establish an explicit empty inventory before creating
+                        # immutable blobs, so a crash on first upload is retryable.
+                        manifest_etag = self._publish_manifest(
+                            {"version": 2, "files": {}, "tombstones": tombstones}, manifest_etag)
+                    for name in changes:
+                        self._guard()
+                        content = desired.get(name)
+                        if content is None:
+                            # Publish deletion through inventory first. Keeping the
+                            # unreferenced object makes interrupted publication safe.
+                            removed = inventory.pop(name, None)
+                            if removed:
+                                deleted_inventory[name] = dict(removed, deleted_at=datetime.now(timezone.utc).isoformat())
+                            next_baseline.pop(name, None)
+                        else:
+                            from .remote import S3Remote
+                            inventory[name] = {"sha256": self._sha(content), "size": len(content)}
+                            if isinstance(self.remote, S3Remote):
+                                inventory[name]["blob"] = self.remote.upload_version(content)
+                            else:
+                                self.remote.upload_file(name, content)
+                            next_baseline[name] = content
+                            deleted_inventory.pop(name, None)
+                        pushed.append(name)
+                    if changes:
+                        self._guard()
+                        manifest.update(version=2, files=inventory, tombstones=deleted_inventory,
+                                        last_sync=datetime.now(timezone.utc).isoformat(),
+                                        machine_id=self._get_machine_id())
+                        self._publish_manifest(manifest, manifest_etag)
+                        for name in changes:
+                            if name not in desired:
+                                self._guard()
+                                self.remote.delete_file(name)
+                self._save_baseline(next_baseline)
+                # A Git tag is only a convenience checkpoint once every local
+                # file matches the acknowledged remote state.
+                if desired == next_baseline:
+                    self.git.update_sync_tag()
+                return {"status": "ok", "pushed": pushed, "pulled": pulled,
+                        "deleted": deleted, "conflicts": conflicts, "direction": direction}
+        finally:
+            if not dry_run:
+                self.remote.release_lock()
+
+    def _publish_manifest(self, manifest, expected_etag):
+        from .remote import S3Remote
+        if isinstance(self.remote, S3Remote):
+            return self.remote.put_manifest(manifest, expected_etag=expected_etag)
+        return self.remote.put_manifest(manifest)
 
     def _build_local_manifest(self) -> dict:
-        """Build a manifest of local files with SHA256 hashes."""
-        import hashlib
-        manifest = {}
-        for filepath in sorted(self.storage_dir.glob("*.md")):
-            content = filepath.read_bytes()
-            sha = hashlib.sha256(content).hexdigest()
-            manifest[filepath.name] = {
-                "sha256": sha,
-                "size": len(content),
-                "modified": filepath.stat().st_mtime,
-            }
-        return manifest
+        return {path.name: {"sha256": self._sha(path.read_bytes()),
+                            "size": path.stat().st_size, "modified": path.stat().st_mtime}
+                for path in sorted(self.storage_dir.glob("*.md"))}
 
-    def _detect_remote_changes(
-        self, remote_manifest: dict, local_manifest: dict
-    ) -> dict:
-        """Compare remote manifest against local to find files changed remotely.
-
-        Returns dict of {filename: remote_entry} for files that differ.
-        """
-        changes = {}
-        remote_files = remote_manifest.get("files", {})
-        for name, remote_entry in remote_files.items():
-            local_entry = local_manifest.get(name)
-            if local_entry is None:
-                # New file on remote
-                changes[name] = remote_entry
-            elif local_entry["sha256"] != remote_entry.get("sha256"):
-                # Modified on remote
-                changes[name] = remote_entry
-        # Detect remote deletions
-        for name in local_manifest:
-            if name not in remote_files and remote_manifest.get("files"):
+    def _detect_remote_changes(self, remote_manifest: dict, local_manifest: dict) -> dict:
+        # Compatibility helper: absence only represents deletion after a prior
+        # baseline explicitly recorded that file.
+        changes = {name: entry for name, entry in remote_manifest.get("files", {}).items()
+                   if entry.get("sha256") != local_manifest.get(name, {}).get("sha256")}
+        for name in self._load_baseline():
+            if name not in remote_manifest.get("files", {}):
                 changes[name] = {"deleted": True}
         return changes
-
-    def _pull(self, remote_changes: dict) -> dict:
-        """Pull remote changes: download, create temp branch, merge."""
-        from .conflict import resolve_conflicts
-
-        pulled = []
-        conflicts = []
-
-        # Download changed files to a temp directory
-        temp_dir = self.storage_dir.parent / "sync" / "temp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            for filename, entry in remote_changes.items():
-                if entry.get("deleted"):
-                    # Remote deletion — remove locally
-                    local_path = self.storage_dir / filename
-                    if local_path.exists():
-                        local_path.unlink()
-                    pulled.append(filename)
-                    continue
-
-                # Download from S3
-                content = self.remote.download_file(filename)
-                if content is not None:
-                    (temp_dir / filename).write_bytes(content)
-
-            # Create a temp branch from last-sync, apply remote changes
-            main_branch = self.git.get_current_branch()
-            self.git.create_branch("remote-sync", self.git.SYNC_TAG)
-
-            try:
-                # Copy downloaded files into working tree
-                for filepath in temp_dir.glob("*.md"):
-                    shutil.copy2(str(filepath), str(self.storage_dir / filepath.name))
-
-                # Remove files deleted remotely
-                for filename, entry in remote_changes.items():
-                    if entry.get("deleted"):
-                        local_path = self.storage_dir / filename
-                        if local_path.exists():
-                            local_path.unlink()
-
-                self.git.add_and_commit("sync: remote changes")
-
-                # Switch back to main and merge
-                self.git.checkout(main_branch)
-                success, conflicted = self.git.merge("remote-sync")
-
-                if not success and conflicted:
-                    # Resolve conflicts using entry-aware resolver
-                    for conflict_file in conflicted:
-                        filepath = self.storage_dir / conflict_file
-                        if filepath.exists():
-                            resolved, conflict_info = resolve_conflicts(filepath)
-                            if resolved:
-                                filepath.write_text(resolved, encoding="utf-8")
-                                conflicts.append(conflict_info)
-                                self._log_conflict(conflict_info)
-
-                    self.git.add_and_commit("sync: merged with conflict resolution")
-
-                pulled = [
-                    f for f in remote_changes.keys()
-                    if not remote_changes[f].get("deleted")
-                ]
-            except Exception:
-                # Cleanup on failure
-                self.git.abort_merge()
-                self.git.checkout(main_branch)
-                raise
-            finally:
-                self.git.delete_branch("remote-sync")
-        finally:
-            # Clean up temp dir
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-        return {"pulled": pulled, "conflicts": conflicts}
-
-    def _push(self, local_changes: list[str]) -> dict:
-        """Push local changes to S3."""
-        pushed = []
-        for filename in local_changes:
-            filepath = self.storage_dir / filename
-            if filepath.exists():
-                content = filepath.read_bytes()
-                # Verify hash before upload
-                import hashlib
-                sha = hashlib.sha256(content).hexdigest()
-                self.remote.upload_file(filename, content)
-                pushed.append(filename)
-            else:
-                # File was deleted locally — remove from S3
-                self.remote.delete_file(filename)
-                pushed.append(filename)
-
-        # Update manifest
-        manifest = self._build_local_manifest()
-        self.remote.put_manifest({
-            "files": manifest,
-            "last_sync": datetime.now(timezone.utc).isoformat(),
-            "machine_id": self._get_machine_id(),
-        })
-
-        return {"pushed": pushed}
 
     def _log_conflict(self, conflict_info: dict) -> None:
         """Log conflict details to ~/.hkb/sync/conflicts/ for review."""
         self._conflict_log_dir.mkdir(parents=True, exist_ok=True)
-        ts = int(time.time())
+        ts = time.time_ns()
         log_file = self._conflict_log_dir / f"conflict_{ts}.json"
         log_file.write_text(json.dumps(conflict_info, indent=2))
 
@@ -584,8 +670,11 @@ class SyncEngine:
 
     def get_status(self) -> dict:
         """Get current sync status."""
-        local_changes = self.git.get_changed_files() if self.git.is_initialized() else []
-        local_changes = [f for f in local_changes if f.endswith(".md")]
+        with storage_lock(self.storage_dir):
+            baseline = self._load_baseline()
+            local = self._build_local_manifest()
+            local_changes = sorted(name for name in set(baseline) | set(local)
+                                   if self._sha(baseline.get(name)) != local.get(name, {}).get("sha256"))
         commit_count = self.git.get_commit_count_since_sync() if self.git.is_initialized() else 0
 
         return {
@@ -627,48 +716,56 @@ class SyncWorker(threading.Thread):
         self._observer = None
         self._debounce_timer: Optional[threading.Timer] = None
         self._debounce_seconds = 5.0
+        self._is_leader = False
 
     def run(self):
-        """Main worker loop."""
-        # Start filesystem watcher if available
-        if WATCHDOG_AVAILABLE:
-            self._start_watcher()
-
-        # Perform an immediate sync on startup
+        """Elect one process as leader; waiting clients take over after release."""
+        leader = FileLock(self.engine.storage_dir.parent / "sync" / "leader.lock",
+                          timeout=0, name="sync leader")
         try:
-            self.engine.sync()
-        except Exception as e:
-            logger.error("Initial background sync failed: %s", e)
-
-        while not self._stop_event.is_set():
-            # Wait for either: interval timeout, explicit sync request, or stop
-            self._stop_event.wait(timeout=self.interval)
-
-            if self._stop_event.is_set():
-                break
-
-            # Perform sync
-            try:
-                self.engine.sync()
-            except Exception as e:
-                logger.error("Background sync failed: %s", e)
-
-            self._sync_requested.clear()
+            while not self._stop_event.is_set():
+                if not self._is_leader:
+                    if not leader.try_acquire():
+                        self._sync_requested.wait(timeout=min(self.interval, 1.0))
+                        self._sync_requested.clear()
+                        continue
+                    self._is_leader = True
+                    if WATCHDOG_AVAILABLE:
+                        self._start_watcher()
+                self._sync_requested.clear()
+                try:
+                    self.engine.sync()
+                except Exception as e:
+                    logger.error("Background sync failed: %s", e)
+                if self._stop_event.is_set():
+                    break
+                # A distinct wake event never clears the sticky shutdown flag.
+                interval = min(self.interval, self.engine.config.sync_interval)
+                self._sync_requested.wait(timeout=max(0.05, interval))
+        finally:
+            was_leader = self._is_leader
+            self._is_leader = False
+            if self._observer:
+                self._observer.stop()
+                self._observer.join(timeout=2)
+                self._observer = None
+            if was_leader:
+                leader.release()
 
     def stop(self):
-        """Stop the worker thread."""
+        """Request cancellation without waiting for network or active mutations."""
         self._stop_event.set()
+        self.engine._cancel_event.set()
+        self._sync_requested.set()
         if self._debounce_timer:
             self._debounce_timer.cancel()
-        if self._observer:
-            self._observer.stop()
-            self._observer.join(timeout=5)
 
     def request_sync(self):
-        """Request an immediate sync (debounced)."""
         self._sync_requested.set()
-        self._stop_event.set()  # Wake up the wait
-        self._stop_event.clear()  # Reset for next iteration
+
+    @property
+    def is_leader(self):
+        return self._is_leader
 
     def _start_watcher(self):
         """Start filesystem watcher on storage directory."""
@@ -685,11 +782,14 @@ class SyncWorker(threading.Thread):
 
     def _on_fs_change(self):
         """Called by filesystem handler (debounced)."""
+        if self._stop_event.is_set():
+            return
         if self._debounce_timer:
             self._debounce_timer.cancel()
         self._debounce_timer = threading.Timer(
             self._debounce_seconds, self.request_sync
         )
+        self._debounce_timer.daemon = True
         self._debounce_timer.start()
 
     @property
@@ -710,4 +810,12 @@ if WATCHDOG_AVAILABLE:
 
         def on_created(self, event):
             if not event.is_directory and event.src_path.endswith(".md"):
+                self.worker._on_fs_change()
+
+        def on_deleted(self, event):
+            if not event.is_directory and event.src_path.endswith(".md"):
+                self.worker._on_fs_change()
+
+        def on_moved(self, event):
+            if not event.is_directory and (event.src_path.endswith(".md") or event.dest_path.endswith(".md")):
                 self.worker._on_fs_change()

@@ -16,8 +16,6 @@ mcp = pytest.importorskip("mcp")
 
 from hyperkb.mcp_server import (
     AppContext,
-    LOCK_FILENAME,
-    _ServerLock,
     app_lifespan,
     hkb_add,
     hkb_context,
@@ -1424,7 +1422,7 @@ class TestHkbHealth:
                 assert c["fix_commands"] == []
 
     def test_health_fix_commands_compact(self, kb_store):
-        """Compaction-ready files get hkb_compact commands."""
+        """Compaction-ready files get current dry-run compact commands."""
         kb_store.create_file("compact.test", "compaction test", ["test"])
         # Add clustered entries close together (within 1h gap)
         for i in range(4):
@@ -1437,7 +1435,7 @@ class TestHkbHealth:
         compact_checks = [c for c in result["checks"] if c["name"] == "compaction_readiness"]
         if compact_checks and compact_checks[0]["status"] != "ok":
             cmds = compact_checks[0]["fix_commands"]
-            assert any('hkb_compact(name="compact.test")' in cmd for cmd in cmds)
+            assert any('hkb_health(action="compact", file="compact.test", dry_run=True)' in cmd for cmd in cmds)
 
     def test_health_fix_commands_empty_files(self, kb_store):
         """Empty files get hkb_add commands."""
@@ -1451,7 +1449,7 @@ class TestHkbHealth:
         assert any('hkb_add(to="empty.test"' in cmd for cmd in cmds)
 
     def test_health_fix_commands_reindex(self, kb_store):
-        """DB/disk drift suggests hkb_reindex."""
+        """DB/disk drift suggests the current reindex action."""
         # Insert a file into DB without creating on disk
         from hyperkb.models import FileHeader
         kb_store.db.insert_file(
@@ -1464,7 +1462,7 @@ class TestHkbHealth:
         assert len(drift_checks) == 1
         if drift_checks[0]["status"] != "ok":
             cmds = drift_checks[0]["fix_commands"]
-            assert "hkb_reindex()" in cmds
+            assert 'hkb_health(action="reindex")' in cmds
 
     def test_health_fix_commands_capped(self, kb_store):
         """Fix commands are capped at 5 with overflow note."""
@@ -1518,251 +1516,3 @@ class TestBriefingHealthHints:
 
 
 # ---------------------------------------------------------------------------
-# _ServerLock — process-level exclusive lock
-# ---------------------------------------------------------------------------
-
-class TestServerLock:
-    def test_lock_acquisition(self, tmp_path):
-        """Lock can be acquired on a fresh directory and creates the lock file."""
-        lock = _ServerLock(tmp_path)
-        lock.acquire()
-        try:
-            assert (tmp_path / LOCK_FILENAME).exists()
-        finally:
-            lock.release()
-
-    def test_lock_writes_pid(self, tmp_path):
-        """Lock file contains the current process PID."""
-        lock = _ServerLock(tmp_path)
-        lock.acquire()
-        try:
-            content = (tmp_path / LOCK_FILENAME).read_text()
-            assert content.strip() == str(os.getpid())
-        finally:
-            lock.release()
-
-    def test_second_lock_fails(self, tmp_path):
-        """A second lock on the same dir raises RuntimeError."""
-        lock1 = _ServerLock(tmp_path)
-        lock1.acquire()
-        try:
-            lock2 = _ServerLock(tmp_path)
-            with pytest.raises(RuntimeError, match="double acquire"):
-                lock2.acquire()
-        finally:
-            lock1.release()
-
-    def test_lock_released_after_release(self, tmp_path):
-        """After release(), a new lock can be acquired."""
-        lock1 = _ServerLock(tmp_path)
-        lock1.acquire()
-        lock1.release()
-
-        lock2 = _ServerLock(tmp_path)
-        lock2.acquire()
-        lock2.release()
-
-    def test_release_is_idempotent(self, tmp_path):
-        """Calling release() twice does not raise."""
-        lock = _ServerLock(tmp_path)
-        lock.acquire()
-        lock.release()
-        lock.release()  # should not raise
-
-    def test_lock_released_on_fd_close(self, tmp_path):
-        """Simulates process death by closing fd — new lock succeeds."""
-        lock1 = _ServerLock(tmp_path)
-        lock1.acquire()
-        # Simulate abrupt exit by closing the fd directly
-        if lock1._fd is not None:
-            os.close(lock1._fd)
-            lock1._fd = None
-
-        lock2 = _ServerLock(tmp_path)
-        lock2.acquire()
-        lock2.release()
-
-    def test_lock_skipped_without_fcntl(self, tmp_path, monkeypatch):
-        """On platforms without fcntl, acquire is a no-op (no error raised)."""
-        import hyperkb.mcp_server as mcp_mod
-        monkeypatch.setattr(mcp_mod, "_HAS_FCNTL", False)
-        lock = _ServerLock(tmp_path)
-        lock.acquire()  # should not raise
-        assert lock._fd is None
-        lock.release()
-
-    # -- _is_hkb_mcp_process --
-
-    def test_is_hkb_mcp_process_nonexistent_pid(self):
-        """Returns False for a PID that does not exist."""
-        assert _ServerLock._is_hkb_mcp_process(999_999_999) is False
-
-    def test_is_hkb_mcp_process_current_process(self):
-        """Doesn't crash when called on a valid PID (our own)."""
-        # We just verify it returns a bool without raising.
-        result = _ServerLock._is_hkb_mcp_process(os.getpid())
-        assert isinstance(result, bool)
-
-    # -- _terminate_stale --
-
-    def test_terminate_stale_nonexistent_pid(self):
-        """Returns True immediately for a PID that is already dead."""
-        assert _ServerLock._terminate_stale(999_999_999) is True
-
-    def test_terminate_stale_sigterm_works(self):
-        """Subprocess is killed via SIGTERM."""
-        import subprocess
-        proc = subprocess.Popen(
-            ["sleep", "300"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        assert _ServerLock._terminate_stale(proc.pid) is True
-        proc.wait()  # reap zombie
-
-    def test_terminate_stale_needs_sigkill(self, monkeypatch):
-        """Escalates to SIGKILL when SIGTERM is ignored."""
-        import subprocess
-        import hyperkb.mcp_server as mcp_mod
-
-        # Use short timeouts so the test doesn't take 7 seconds.
-        monkeypatch.setattr(mcp_mod, "_SIGTERM_TIMEOUT", 1)
-        monkeypatch.setattr(mcp_mod, "_SIGKILL_TIMEOUT", 2)
-
-        # Python subprocess that traps SIGTERM and ignores it.
-        proc = subprocess.Popen(
-            [
-                "python3", "-c",
-                "import signal, time; "
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "time.sleep(300)",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        assert _ServerLock._terminate_stale(proc.pid) is True
-        proc.wait()  # reap zombie
-
-    # -- Stale recovery in acquire() --
-
-    def test_stale_recovery_kills_holder_and_acquires(self, tmp_path):
-        """Full integration: spawns holder subprocess, acquire() terminates it."""
-        import subprocess
-        import sys
-
-        # The subprocess script name must contain "mcp_server" so
-        # _is_hkb_mcp_process() identifies it via /proc/cmdline.
-        script = tmp_path / "fake_mcp_server.py"
-        lock_file = tmp_path / LOCK_FILENAME
-        script.write_text(
-            "import os, fcntl, time\n"
-            f"fd = os.open('{lock_file}', os.O_RDWR | os.O_CREAT, 0o644)\n"
-            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-            "os.ftruncate(fd, 0)\n"
-            "os.write(fd, str(os.getpid()).encode())\n"
-            "time.sleep(300)\n"
-        )
-
-        holder = subprocess.Popen(
-            [sys.executable, str(script)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Wait for the child to actually acquire the lock.
-        import time
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                content = lock_file.read_text().strip()
-                if content == str(holder.pid):
-                    break
-            except (FileNotFoundError, ValueError):
-                pass
-            time.sleep(0.05)
-
-        try:
-            lock = _ServerLock(tmp_path)
-            lock.acquire()  # should kill the holder and succeed
-            try:
-                # Verify we now hold the lock with our PID.
-                content = lock_file.read_text().strip()
-                assert content == str(os.getpid())
-            finally:
-                lock.release()
-        finally:
-            holder.wait()
-
-    def test_stale_recovery_non_hkb_process_not_killed(self, tmp_path):
-        """If holder PID is not hkb-mcp, no kill — retry fails → RuntimeError."""
-        import fcntl as _fcntl
-
-        # Write a fake PID (our own PID + 1 — unlikely to be hkb-mcp).
-        fake_pid = 999_999_999  # nonexistent
-        lock_path = tmp_path / LOCK_FILENAME
-
-        # Acquire the lock from *this* process to simulate a held lock.
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        _fcntl.flock(fd, _fcntl.LOCK_EX)
-        os.ftruncate(fd, 0)
-        os.write(fd, str(fake_pid).encode())
-
-        try:
-            lock = _ServerLock(tmp_path)
-            with pytest.raises(RuntimeError, match="recovery failed"):
-                lock.acquire()
-        finally:
-            os.close(fd)
-
-    def test_stale_recovery_unparseable_pid(self, tmp_path):
-        """Garbage PID in lock file → RuntimeError (no kill attempt)."""
-        import fcntl as _fcntl
-
-        lock_path = tmp_path / LOCK_FILENAME
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        _fcntl.flock(fd, _fcntl.LOCK_EX)
-        os.ftruncate(fd, 0)
-        os.write(fd, b"garbage")
-
-        try:
-            lock = _ServerLock(tmp_path)
-            with pytest.raises(RuntimeError, match="unparseable"):
-                lock.acquire()
-        finally:
-            os.close(fd)
-
-
-class TestLifespanLock:
-    def test_lifespan_acquires_lock(self, tmp_path, monkeypatch):
-        """After lifespan starts, server.lock exists with our PID."""
-        import asyncio
-        import hyperkb.mcp_server as mcp_mod
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(mcp_mod, "_server_args", _parse_server_args([]))
-
-        async def _run():
-            server = MagicMock()
-            async with app_lifespan(server) as ctx:
-                lock_path = tmp_path / ".hkb" / LOCK_FILENAME
-                assert lock_path.exists()
-                assert lock_path.read_text().strip() == str(os.getpid())
-
-        asyncio.run(_run())
-
-    def test_lifespan_second_instance_blocked(self, tmp_path, monkeypatch):
-        """While lifespan is active, a second _ServerLock.acquire() raises."""
-        import asyncio
-        import hyperkb.mcp_server as mcp_mod
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(mcp_mod, "_server_args", _parse_server_args([]))
-
-        async def _run():
-            server = MagicMock()
-            async with app_lifespan(server) as ctx:
-                hkb_dir = tmp_path / ".hkb"
-                lock2 = _ServerLock(hkb_dir)
-                with pytest.raises(RuntimeError, match="double acquire"):
-                    lock2.acquire()
-
-        asyncio.run(_run())

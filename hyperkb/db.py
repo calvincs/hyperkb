@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .locking import storage_lock
 from .config import KBConfig
 from .format import safe_parse_json_list, extract_wikilinks
 from .models import FileHeader, Entry, SearchResult
@@ -25,8 +26,8 @@ class TimeoutLock:
     ``TimeoutError`` so the caller fails loudly instead of hanging.
     """
 
-    def __init__(self, timeout: float, name: str = "lock"):
-        self._lock = threading.Lock()
+    def __init__(self, timeout: float, name: str = "lock", reentrant: bool = False):
+        self._lock = threading.RLock() if reentrant else threading.Lock()
         self._timeout = timeout
         self._name = name
 
@@ -48,100 +49,115 @@ class KBDatabase:
         self.config = config
         self.db_path = config.db_path
         self.conn: Optional[sqlite3.Connection] = None
-        self._lock = TimeoutLock(timeout=60, name="db")
+        self._identity = None
+        self._lock = TimeoutLock(timeout=60, name="db", reentrant=True)
 
     def connect(self) -> sqlite3.Connection:
-        if self.conn is None:
-            self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA busy_timeout=30000")
-            self.conn.execute("PRAGMA foreign_keys=ON")
-            # Run schema migrations on every connect so existing KBs
-            # pick up new columns (e.g. status, entry_type, tags).
-            self._migrate_entry_metadata(self.conn)
-            self._migrate_entry_links(self.conn)
-        return self.conn
+        with self._lock:
+            if self.conn is not None:
+                try:
+                    stat = self.db_path.stat()
+                    identity = (stat.st_dev, stat.st_ino)
+                except FileNotFoundError:
+                    identity = None
+                if identity != self._identity:
+                    self.conn.close()
+                    self.conn = None
+            if self.conn is None:
+                self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                stat = self.db_path.stat()
+                self._identity = (stat.st_dev, stat.st_ino)
+                self.conn.row_factory = sqlite3.Row
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA busy_timeout=30000")
+                self.conn.execute("PRAGMA foreign_keys=ON")
+                # Run schema migrations on every connect so existing KBs
+                # pick up new columns (e.g. status, entry_type, tags).
+                self._migrate_entry_metadata(self.conn)
+                self._migrate_entry_links(self.conn)
+            return self.conn
 
     def close(self):
-        if self.conn:
-            try:
-                # Merge WAL back into main DB and remove WAL/SHM files.
-                # Prevents "database is locked" for the next process.
-                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except sqlite3.OperationalError:
-                logger.debug("WAL checkpoint failed during close (non-fatal)")
-            self.conn.close()
-            self.conn = None
+        with self._lock:
+            if self.conn:
+                try:
+                    # Merge WAL back into main DB and remove WAL/SHM files.
+                    # Prevents "database is locked" for the next process.
+                    self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except sqlite3.OperationalError:
+                    logger.debug("WAL checkpoint failed during close (non-fatal)")
+                self.conn.close()
+                self.conn = None
 
     def init_schema(self):
         """Create all tables and indexes."""
-        conn = self.connect()
+        with storage_lock(self.config.storage_dir), self._lock:
+            conn = self.connect()
 
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS files (
-                name TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                description TEXT NOT NULL,
-                keywords TEXT NOT NULL DEFAULT '[]',
-                links TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                compacted_at TEXT DEFAULT ''
-            );
-
-            CREATE TABLE IF NOT EXISTS entries (
-                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name TEXT NOT NULL REFERENCES files(name) ON DELETE CASCADE,
-                epoch INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                UNIQUE(file_name, epoch)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_entries_epoch ON entries(epoch);
-            CREATE INDEX IF NOT EXISTS idx_entries_file ON entries(file_name);
-
-            CREATE TABLE IF NOT EXISTS entry_links (
-                source_file TEXT NOT NULL,
-                source_epoch INTEGER NOT NULL,
-                target_file TEXT NOT NULL,
-                target_epoch INTEGER NOT NULL DEFAULT 0,
-                link_type TEXT NOT NULL DEFAULT 'file',
-                PRIMARY KEY (source_file, source_epoch, target_file, target_epoch, link_type)
-            );
-            CREATE INDEX IF NOT EXISTS idx_entry_links_target
-                ON entry_links(target_file, target_epoch);
-        """)
-
-        # Schema migration: add metadata columns if missing
-        self._migrate_entry_metadata(conn)
-
-        # FTS5 for BM25 search on entries
-        try:
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-                    content,
-                    file_name,
-                    content_rowid='rowid',
-                    tokenize='porter unicode61'
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS files (
+                    name TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    keywords TEXT NOT NULL DEFAULT '[]',
+                    links TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    compacted_at TEXT DEFAULT ''
                 );
-            """)
-        except sqlite3.OperationalError:
-            pass  # FTS5 not available
 
-        # FTS5 for file metadata search (standalone, not external content)
-        try:
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-                    name,
-                    description,
-                    keywords,
-                    tokenize='porter unicode61'
+                CREATE TABLE IF NOT EXISTS entries (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_name TEXT NOT NULL REFERENCES files(name) ON DELETE CASCADE,
+                    epoch INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    UNIQUE(file_name, epoch)
                 );
-            """)
-        except sqlite3.OperationalError:
-            pass
 
-        conn.commit()
+                CREATE INDEX IF NOT EXISTS idx_entries_epoch ON entries(epoch);
+                CREATE INDEX IF NOT EXISTS idx_entries_file ON entries(file_name);
+
+                CREATE TABLE IF NOT EXISTS entry_links (
+                    source_file TEXT NOT NULL,
+                    source_epoch INTEGER NOT NULL,
+                    target_file TEXT NOT NULL,
+                    target_epoch INTEGER NOT NULL DEFAULT 0,
+                    link_type TEXT NOT NULL DEFAULT 'file',
+                    PRIMARY KEY (source_file, source_epoch, target_file, target_epoch, link_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_entry_links_target
+                    ON entry_links(target_file, target_epoch);
+            """)
+
+            # Schema migration: add metadata columns if missing
+            self._migrate_entry_metadata(conn)
+
+            # FTS5 for BM25 search on entries
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+                        content,
+                        file_name,
+                        content_rowid='rowid',
+                        tokenize='porter unicode61'
+                    );
+                """)
+            except sqlite3.OperationalError:
+                pass  # FTS5 not available
+
+            # FTS5 for file metadata search (standalone, not external content)
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                        name,
+                        description,
+                        keywords,
+                        tokenize='porter unicode61'
+                    );
+                """)
+            except sqlite3.OperationalError:
+                pass
+
+            conn.commit()
 
     def _migrate_entry_metadata(self, conn: sqlite3.Connection):
         """Add status, entry_type, tags columns to entries if missing.
@@ -507,6 +523,7 @@ class KBDatabase:
         exclude_archives: bool = True,
         author: Optional[str] = None,
         hostname: Optional[str] = None,
+        domain: Optional[str] = None,
     ) -> list[SearchResult]:
         """BM25 full-text search on entries."""
         import re
@@ -551,12 +568,16 @@ class KBDatabase:
                     params.append(entry_type)
                 if exclude_archives:
                     sql += " AND entries.file_name NOT LIKE '%.archive'"
-                if author:
+                if author is not None:
                     sql += " AND entries.author = ?"
                     params.append(author)
-                if hostname:
+                if hostname is not None:
                     sql += " AND entries.hostname = ?"
                     params.append(hostname)
+
+                if domain:
+                    sql += " AND (entries.file_name = ? OR substr(entries.file_name, 1, ?) = ?)"
+                    params.extend([domain, len(domain) + 1, domain + "."])
 
                 sql += " ORDER BY rank LIMIT ? OFFSET ?"
                 params.append(limit)
@@ -852,18 +873,15 @@ class KBDatabase:
             return []
         with self._lock:
             conn = self.connect()
-            # Build WHERE clause with OR'd pairs
-            conditions = " OR ".join(
-                "(file_name = ? AND epoch = ?)" for _ in keys
-            )
-            params = []
-            for fn, ep in keys:
-                params.extend([fn, ep])
-            rows = conn.execute(
-                f"SELECT * FROM entries WHERE {conditions} ORDER BY epoch ASC",
-                params,
-            ).fetchall()
-            return [dict(r) for r in rows]
+            rows = []
+            keys = list(set(keys))
+            # Stay below SQLite variable/expression limits for large rg result sets.
+            for start in range(0, len(keys), 400):
+                batch = keys[start:start + 400]
+                conditions = " OR ".join("(file_name = ? AND epoch = ?)" for _ in batch)
+                params = [value for key in batch for value in key]
+                rows.extend(conn.execute(f"SELECT * FROM entries WHERE {conditions}", params).fetchall())
+            return [dict(row) for row in sorted(rows, key=lambda row: row["epoch"])]
 
     def get_entry_references(self, file_name: str, epoch: int) -> list[dict]:
         """Get outbound links from a specific entry."""

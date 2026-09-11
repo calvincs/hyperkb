@@ -149,9 +149,10 @@ class TestLocking:
         assert remote.acquire_lock()
         remote.release_lock()
 
-    def test_same_machine_can_reacquire(self, remote):
+    def test_same_machine_cannot_reacquire(self, remote):
         assert remote.acquire_lock()
-        assert remote.acquire_lock()  # Should succeed (same machine)
+        assert not remote.acquire_lock()  # Every operation needs exclusive ownership
+        assert remote.renew_lock()
         remote.release_lock()
 
     def test_different_machine_blocked(self, remote, s3_env):
@@ -249,3 +250,16 @@ class TestErrorHandling:
     def test_release_lock_no_error_when_no_lock(self, remote):
         # Should not raise
         remote.release_lock()
+
+
+class TestSdkContract:
+    def test_s3_model_supports_conditional_lease_and_manifest_operations(self):
+        """The declared boto3 floor must expose all fencing preconditions.
+
+        Official boto3/botocore 1.40.0 wheel models were checked for this contract;
+        botocore 1.34.0 lacks all three members and cannot provide safe sync.
+        """
+        import botocore.session
+        model = botocore.session.get_session().get_service_model("s3")
+        assert {"IfMatch", "IfNoneMatch"} <= set(model.operation_model("PutObject").input_shape.members)
+        assert "IfMatch" in model.operation_model("DeleteObject").input_shape.members

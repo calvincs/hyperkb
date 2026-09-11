@@ -1,21 +1,22 @@
-"""S3-compatible remote storage for hyperkb sync.
+"""S3-compatible sync storage with immutable snapshots and conditional leases.
 
-Handles upload, download, list, manifest management, and advisory locking.
-Uses boto3 directly with graceful degradation if not installed.
+Version 2 layout below the configured prefix:
+    _sync/manifest.json       - versioned live inventory and deletion tombstones
+    _sync/objects/<sha256>    - immutable markdown bytes referenced by the manifest
+    _sync/lock.json           - unique operation lease, TTL and diagnostic machine ID
+    storage/*.md             - legacy version 1 objects (still readable)
 
-S3 layout:
-    s3://bucket/<prefix>/
-        _sync/
-            manifest.json    - file inventory + SHA256 hashes
-            lock.json        - advisory lock (machine_id + TTL)
-        storage/
-            *.md             - mirrors ~/.hkb/storage/ exactly
+Old clients must be upgraded before publishing version 2. Immutable content is
+retained; rebuilding never guesses deleted paths or replaces a version 2 inventory
+with a legacy object listing.
 """
 
 import hashlib
 import json
 import logging
 import time
+import uuid
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -24,11 +25,13 @@ BOTO3_AVAILABLE = False
 try:
     import boto3
     from botocore.exceptions import ClientError, NoCredentialsError
+    from botocore.config import Config
     BOTO3_AVAILABLE = True
 except ImportError:
     pass
 
 LOCK_TTL_SECONDS = 300  # 5 minutes
+_UNCONDITIONAL = object()
 
 
 class S3Remote:
@@ -56,9 +59,13 @@ class S3Remote:
         self.region = region
         self.endpoint_url = endpoint_url
         self._machine_id = self._get_machine_id()
+        self._lease_id = None
+        self.manifest_etag = None
+        self._lease_mutex = threading.RLock()
 
         # Build boto3 client kwargs
-        kwargs = {}
+        kwargs = {"config": Config(connect_timeout=5, read_timeout=15,
+                                    retries={"total_max_attempts": 2})}
         if region:
             kwargs["region_name"] = region
         if endpoint_url:
@@ -134,32 +141,85 @@ class S3Remote:
     def get_manifest(self) -> dict:
         """Get the remote manifest (file inventory + hashes).
 
-        Returns empty dict with "files": {} if manifest doesn't exist.
+        Empty means an unused remote; existing objects without inventory require
+        an explicit rebuild (legacy) or a restored manifest (version 2).
         """
+        return self._read_manifest()
+
+    def _read_manifest(self, allow_legacy_rebuild=False):
         key = self._sync_key("manifest.json")
         try:
             response = self._client.get_object(Bucket=self.bucket, Key=key)
-            return json.loads(response["Body"].read().decode("utf-8"))
+            manifest = json.loads(response["Body"].read().decode("utf-8"))
+            self._validate_manifest_version(manifest)
+            self.manifest_etag = response["ETag"]
+            return manifest
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchKey":
+                objects = self._client.list_objects_v2(Bucket=self.bucket,
+                    Prefix=self._sync_key("objects/"), MaxKeys=1)
+                if objects.get("KeyCount", 0):
+                    raise ValueError("Immutable sync manifest missing; restore it from backup")
+                legacy = self._client.list_objects_v2(Bucket=self.bucket,
+                    Prefix=self._key("storage/"), MaxKeys=1)
+                if legacy.get("KeyCount", 0) and not allow_legacy_rebuild:
+                    raise ValueError("Legacy sync manifest missing; rebuild inventory explicitly before syncing")
+                self.manifest_etag = None
                 return {"files": {}}
             raise
 
-    def put_manifest(self, manifest: dict) -> None:
-        """Write the manifest to S3."""
-        key = self._sync_key("manifest.json")
-        self._client.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=json.dumps(manifest, indent=2).encode("utf-8"),
-            ContentType="application/json",
-        )
+    @staticmethod
+    def _validate_manifest_version(manifest):
+        if (not isinstance(manifest, dict) or type(manifest.get("version", 1)) is not int
+                or manifest.get("version", 1) not in (1, 2)):
+            raise ValueError("Unsupported remote manifest version")
+
+    def put_manifest(self, manifest: dict, *, expected_etag=_UNCONDITIONAL) -> str:
+        """Publish inventory; sync passes its snapshot ETag as a compare-and-swap.
+
+        None requires an absent manifest. Omitting the argument retains the direct
+        administrative API. Conditional revisions are unique, avoiding ETag ABA
+        even when a catalog is changed and later restored to identical content.
+        """
+        self._validate_manifest_version(manifest)
+        conditions = {}
+        if expected_etag is not _UNCONDITIONAL:
+            conditions = {"IfMatch": expected_etag} if expected_etag else {"IfNoneMatch": "*"}
+            manifest = dict(manifest, revision=uuid.uuid4().hex)
+        try:
+            response = self._client.put_object(
+                Bucket=self.bucket, Key=self._sync_key("manifest.json"),
+                Body=json.dumps(manifest, indent=2).encode("utf-8"),
+                ContentType="application/json", **conditions)
+        except ClientError as error:
+            if self._condition_failed(error):
+                raise RuntimeError("Remote manifest changed during sync; retry with current inventory") from error
+            raise
+        self.manifest_etag = response["ETag"]
+        return self.manifest_etag
 
     def rebuild_manifest(self) -> dict:
         """Rebuild manifest by listing S3 bucket and computing hashes.
 
         Used for recovery when manifest is corrupt or missing.
         """
+        current = self._read_manifest(allow_legacy_rebuild=True)
+        if current.get("version") == 2:
+            # Immutable hashes cannot recover filenames or deletion intent. The
+            # authoritative inventory is retained, never reconstructed by listing.
+            if not isinstance(current.get("files"), dict) or not isinstance(current.get("tombstones", {}), dict):
+                raise ValueError("Cannot safely rebuild invalid version 2 manifest")
+            for name, entry in current["files"].items():
+                content = self.download_version(entry["blob"]) if entry.get("blob") else self.download_file(name)
+                if content is None or not self.verify_download(content, entry["sha256"]):
+                    raise ValueError(f"Cannot rebuild: missing or corrupt remote content for {name}")
+            return current
+        # If the manifest was lost after migration, listing legacy storage would
+        # discard the immutable inventory and tombstones. Require a backup.
+        objects = self._client.list_objects_v2(Bucket=self.bucket,
+                                              Prefix=self._sync_key("objects/"), MaxKeys=1)
+        if objects.get("KeyCount", 0):
+            raise ValueError("Immutable sync objects exist; restore the version 2 manifest from backup")
         prefix = f"{self.prefix}storage/"
         files = {}
         paginator = self._client.get_paginator("list_objects_v2")
@@ -184,66 +244,97 @@ class S3Remote:
             "rebuilt": True,
             "last_sync": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        self.put_manifest(manifest)
+        self.put_manifest(manifest, expected_etag=self.manifest_etag)
         return manifest
 
     # --- Advisory locking ---
 
-    def acquire_lock(self) -> bool:
-        """Acquire an advisory lock on the S3 sync.
-
-        Uses a lock.json file with machine_id and TTL.
-        Automatically breaks stale locks (older than TTL).
-
-        Returns True if lock was acquired, False if another machine holds it.
-        """
-        key = self._sync_key("lock.json")
-
-        # Check for existing lock
+    def _read_lock(self):
         try:
-            response = self._client.get_object(Bucket=self.bucket, Key=key)
-            lock_data = json.loads(response["Body"].read().decode("utf-8"))
-            lock_time = lock_data.get("timestamp", 0)
-            lock_machine = lock_data.get("machine_id", "")
+            response = self._client.get_object(Bucket=self.bucket, Key=self._sync_key("lock.json"))
+            return json.loads(response["Body"].read()), response["ETag"]
+        except ClientError as error:
+            if error.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                return None, None
+            raise
 
-            # Same machine can reacquire
-            if lock_machine == self._machine_id:
-                pass  # Fall through to acquire
-            # Check if lock is stale (older than TTL)
-            elif time.time() - lock_time < LOCK_TTL_SECONDS:
-                logger.warning(
-                    "Sync lock held by %s (age: %ds)",
-                    lock_machine,
-                    int(time.time() - lock_time),
-                )
+    def _write_lock(self, lease_id, **condition):
+        return self._client.put_object(
+            Bucket=self.bucket, Key=self._sync_key("lock.json"),
+            Body=json.dumps({"machine_id": self._machine_id, "lease_id": lease_id,
+                             "timestamp": time.time(), "ttl": LOCK_TTL_SECONDS}).encode(),
+            ContentType="application/json", **condition)
+
+    @staticmethod
+    def _condition_failed(error):
+        return error.response["Error"]["Code"] in (
+            "PreconditionFailed", "ConditionalRequestConflict", "412", "409")
+
+    def acquire_lock(self) -> bool:
+        """Acquire a unique lease using an atomic S3 precondition.
+
+        Unsupported conditional writes fail closed. A machine ID is diagnostic,
+        never ownership: two processes on the same machine remain competitors.
+        """
+        with self._lease_mutex:
+            current, etag = self._read_lock()
+            if current and time.time() - current.get("timestamp", 0) < LOCK_TTL_SECONDS:
                 return False
-            else:
-                logger.info("Breaking stale lock from %s", lock_machine)
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "NoSuchKey":
+            lease_id = uuid.uuid4().hex
+            try:
+                self._write_lock(lease_id, **({"IfMatch": etag} if etag else {"IfNoneMatch": "*"}))
+            except ClientError as error:
+                if self._condition_failed(error):
+                    return False
+                raise
+            self._lease_id = lease_id
+            return True
+
+    def renew_lock(self) -> bool:
+        """Renew only the current operation's unexpired lease using compare-and-swap."""
+        with self._lease_mutex:
+            if self._lease_id is None:
+                return False
+            current, etag = self._read_lock()
+            if (not current or current.get("lease_id") != self._lease_id or
+                    time.time() - current.get("timestamp", 0) >= LOCK_TTL_SECONDS):
+                return False
+            try:
+                self._write_lock(self._lease_id, IfMatch=etag)
+                return True
+            except ClientError as error:
+                if self._condition_failed(error):
+                    return False
                 raise
 
-        # Write our lock
-        lock_data = {
-            "machine_id": self._machine_id,
-            "timestamp": time.time(),
-            "ttl": LOCK_TTL_SECONDS,
-        }
-        self._client.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=json.dumps(lock_data).encode("utf-8"),
-            ContentType="application/json",
-        )
-        return True
-
     def release_lock(self) -> None:
-        """Release the advisory lock."""
-        key = self._sync_key("lock.json")
-        try:
-            self._client.delete_object(Bucket=self.bucket, Key=key)
-        except ClientError:
-            logger.debug("Failed to release lock (may already be released)")
+        """Conditionally delete only our lease; never release a successor's lock."""
+        with self._lease_mutex:
+            if self._lease_id is None:
+                return
+            try:
+                current, etag = self._read_lock()
+                if current and current.get("lease_id") == self._lease_id:
+                    self._client.delete_object(Bucket=self.bucket, Key=self._sync_key("lock.json"),
+                                               IfMatch=etag)
+            except ClientError as error:
+                if not self._condition_failed(error):
+                    logger.warning("Failed to release sync lease: %s", error)
+            finally:
+                self._lease_id = None
+
+    def upload_version(self, content: bytes) -> str:
+        """Store immutable content so failed manifest publication cannot corrupt inventory."""
+        digest = hashlib.sha256(content).hexdigest()
+        self._client.put_object(Bucket=self.bucket, Key=self._sync_key("objects/" + digest),
+                                Body=content, ContentType="text/markdown")
+        return digest
+
+    def download_version(self, digest: str) -> bytes:
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("Invalid remote object digest")
+        response = self._client.get_object(Bucket=self.bucket, Key=self._sync_key("objects/" + digest))
+        return response["Body"].read()
 
     def check_lock(self) -> Optional[dict]:
         """Check the current lock status without acquiring.
