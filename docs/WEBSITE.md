@@ -14,6 +14,8 @@ The website follows the documentation pattern used by Agent Mesh: canonical Mark
 
 Do not edit generated output. Public pages and Markdown snapshots are built from the same sources so agents and people see the same documentation.
 
+The visual identity comes from the original HyperKB site (`gh-pages` commit `c974955`): cyan and violet accents, deep navy panels, a subtle grid, Oxanium headings, Syne body text, and Space Mono labels. Shared colors and fonts live in `website/style.css`; `docs.css` uses those same tokens. Keep this theme consistent across the current layouts and interactive controls.
+
 ## Build and check
 
 ```bash
