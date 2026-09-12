@@ -54,8 +54,8 @@ def shell(route, title, description, body, toc=(), source=None):
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · HyperKB</title><meta name="description" content="{esc(description)}">
-<link rel="canonical" href="{SITE_URL}/{route}"><link rel="icon" href="{href('mark.svg')}" type="image/svg+xml">
-<meta name="theme-color" content="#050810"><link rel="stylesheet" href="{href('style.css')}"><link rel="stylesheet" href="{href('docs.css')}">
+<link rel="canonical" href="{SITE_URL}/{route}"><link rel="icon" href="{href('mark.svg')}?v=20260912" type="image/svg+xml">
+<meta name="theme-color" content="#050810"><link rel="stylesheet" href="{href('style.css')}?v=20260912"><link rel="stylesheet" href="{href('docs.css')}?v=20260912">
 <script src="{href('docs.js')}" defer></script></head><body class="docs-page">
 <a class="skip" href="#main">Skip to content</a>
 <header class="site-header wrap"><a class="brand" href="{href('index.html')}" aria-label="HyperKB home"><span class="brand-prompt" aria-hidden="true">▸</span><span>HyperKB</span></a><nav aria-label="Main navigation"><a href="{href('docs/index.html')}" aria-current="{('page' if route == 'docs/index.html' else 'false')}">Documentation</a><a href="{href('llms.txt')}">For agents</a><a href="{REPO_URL}">GitHub ↗</a></nav></header>
