@@ -39,6 +39,16 @@ LOCK_TTL_SECONDS = 300  # 5 minutes
 _UNCONDITIONAL = object()
 
 
+def _if_match(etag):
+    """Condition kwargs for a compare-and-swap write.
+
+    S3 returns ETags quoted, and AWS accepts them quoted or bare in If-Match,
+    but DigitalOcean Spaces answers 412 to the quoted form on PUT and DELETE —
+    which made every lease renewal fail closed. Strip the quotes.
+    """
+    return {"IfMatch": str(etag).strip('"')}
+
+
 class S3Remote:
     """S3-compatible remote storage for sync.
 
@@ -213,7 +223,7 @@ class S3Remote:
             return {"protocol_version": version, "marker_present": False}
 
     def _write_protocol(self, state, expected_etag):
-        conditions = {"IfMatch": expected_etag} if expected_etag else {"IfNoneMatch": "*"}
+        conditions = _if_match(expected_etag) if expected_etag else {"IfNoneMatch": "*"}
         response = self._client.put_object(
             Bucket=self.bucket, Key=self._sync_key("protocol.json"),
             Body=json.dumps({"protocol_version": SYNC_PROTOCOL_VERSION, "state": state,
@@ -371,7 +381,7 @@ class S3Remote:
         self._validate_manifest_version(manifest)
         conditions = {}
         if expected_etag is not _UNCONDITIONAL:
-            conditions = {"IfMatch": expected_etag} if expected_etag else {"IfNoneMatch": "*"}
+            conditions = _if_match(expected_etag) if expected_etag else {"IfNoneMatch": "*"}
             manifest = dict(manifest, revision=uuid.uuid4().hex)
         try:
             response = self._client.put_object(
@@ -469,7 +479,7 @@ class S3Remote:
                 return False
             lease_id = uuid.uuid4().hex
             try:
-                self._write_lock(lease_id, **({"IfMatch": etag} if etag else {"IfNoneMatch": "*"}))
+                self._write_lock(lease_id, **(_if_match(etag) if etag else {"IfNoneMatch": "*"}))
             except ClientError as error:
                 if self._condition_failed(error):
                     return False
@@ -487,7 +497,7 @@ class S3Remote:
                     time.time() - current.get("timestamp", 0) >= LOCK_TTL_SECONDS):
                 return False
             try:
-                self._write_lock(self._lease_id, IfMatch=etag)
+                self._write_lock(self._lease_id, **_if_match(etag))
                 return True
             except ClientError as error:
                 if self._condition_failed(error):
@@ -503,7 +513,7 @@ class S3Remote:
                 current, etag = self._read_lock()
                 if current and current.get("lease_id") == self._lease_id:
                     self._client.delete_object(Bucket=self.bucket, Key=self._sync_key("lock.json"),
-                                               IfMatch=etag)
+                                               **_if_match(etag))
             except ClientError as error:
                 if not self._condition_failed(error):
                     logger.warning("Failed to release sync lease: %s", error)
