@@ -19,11 +19,13 @@ Register in Claude Code settings:
 
 import argparse
 import functools
+import hmac
 import inspect
 
 import anyio
 import json
 import logging
+import os
 import signal
 import sqlite3
 import time
@@ -41,6 +43,7 @@ from .config import KBConfig
 from .format import parse_add_result, parse_time_input, safe_parse_json_list, is_archive_file
 from .store import KnowledgeStore
 from .protocol import ProtocolError, ProtocolGate
+from .rooms import ClaimConflict, Rooms, agent_name, claim_task, normalize_name, release_task, room_files
 
 
 @dataclass
@@ -55,6 +58,9 @@ class AppContext:
     tool_limiter: object | None = None  # Per-client bounded blocking work
     protocol_gate: object | None = None
     protocol_warning: str = ""
+    room: str = ""  # Room this session joined
+    agent: str = ""  # This session's agent name in the room
+    room_checkin_at: float = 0.0  # time.monotonic() of the last join/check-in
 
     def __post_init__(self):
         if self.anchors is None:
@@ -79,6 +85,13 @@ def _parse_server_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Explicit KB root directory (default: ~/.hkb/).",
     )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve Streamable HTTP instead of stdio, for clients that cannot launch a local process.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1).")
+    parser.add_argument("--port", type=int, default=8377, help="HTTP port (default: 8377).")
     return parser.parse_args(argv)
 
 
@@ -243,7 +256,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
 SERVER_INSTRUCTIONS = """\
 hyperkb is your persistent knowledge base — long-term memory that survives across sessions.
-10 tools, each with sub-actions where applicable.
+11 tools, each with sub-actions where applicable.
 
 START OF SESSION: Call hkb_session(action="briefing") for overview, then hkb_search for targeted lookup.
 If an operation reports upgrade_required or store_upgrade_required, tell the user
@@ -258,17 +271,22 @@ DO NOT RECORD: trivial edits, transient state, info already in codebase, raw tra
 ENTRY FORMAT: 2-5 sentences, [[file.name]] wiki-links, @weight: high for important entries.
 WORKFLOW: hkb_show() → find file → hkb_add(to=file). No file? hkb_add(create_file=True).
 
+ROOMS: when the user names a room to work in, call hkb_room(action="join", room=..., name=...)
+first, read the guide it returns, and follow it. Check in as the guide says. A "_room" note
+on any tool result means you have unread room messages or a check-in is due.
+
 TOOLS:
 - hkb_search: Find entries (mode=hybrid/rg/bm25/recent/check)
 - hkb_context: Token-budgeted retrieval (mode=packed/suggest/narrative)
 - hkb_show: Read files, list files (name="" → list), link graph (links=True)
 - hkb_add: Add entry or create file (create_file=True)
 - hkb_update: Amend entry (action=update/archive/batch)
-- hkb_task: Task lifecycle (action=create/show/update/list)
+- hkb_task: Task lifecycle (action=create/show/update/list/claim/release)
 - hkb_sync: Sync operations (action=push/pull/both/status/config/conflicts)
 - hkb_session: Briefing/review/anchor (action=briefing/review/anchor)
 - hkb_view: Named file groupings (action=set/list)
 - hkb_health: Maintenance (action=check/reindex/compact)
+- hkb_room: Work with other agents (action=join/checkin/send/inbox/who/charter/leave)
 """
 
 mcp_server = FastMCP(f"hyperkb v{__version__}", instructions=SERVER_INSTRUCTIONS, lifespan=app_lifespan)
@@ -328,7 +346,35 @@ def _run_guarded_tool(fn, bound, app_ctx):
         app_ctx.protocol_gate.check(allow_local=True)
         return _with_protocol_notice(result, app_ctx.protocol_gate.state)
     app_ctx.protocol_gate.check(allow_offline=not remote_action, allow_local=not remote_action)
-    return _with_protocol_notice(fn(*bound.args, **bound.kwargs), app_ctx.protocol_gate.state)
+    result = _with_protocol_notice(fn(*bound.args, **bound.kwargs), app_ctx.protocol_gate.state)
+    # hkb_room reports its own state; packed context must keep its token budget.
+    if fn.__name__ in ("hkb_room", "hkb_context"):
+        return result
+    return _with_room_notice(result, app_ctx)
+
+
+def _with_room_notice(result, app_ctx):
+    """Tell a joined agent about unread messages or a late check-in. Never fails a tool."""
+    if not app_ctx.room:
+        return result
+    try:
+        rooms = Rooms(app_ctx.store)
+        unread = rooms.unread_count(app_ctx.room, app_ctx.agent)
+        minutes = rooms.who(app_ctx.room)["checkin_minutes"]
+        due = time.monotonic() - app_ctx.room_checkin_at > minutes * 60
+        if not unread and not due:
+            return result
+        notice = {"room": app_ctx.room, "unread": unread, "checkin_due": due,
+                  "next": 'Call hkb_room(action="checkin").'}
+        parsed = json.loads(result)
+        if isinstance(parsed, dict):
+            parsed.setdefault("_room", notice)
+        else:
+            parsed = {"result": parsed, "_room": notice}
+        return json.dumps(parsed, indent=2)
+    except Exception as e:
+        logger.debug("Room notice skipped: %s", e)
+        return result
 
 
 def _with_protocol_notice(result, state):
@@ -1321,7 +1367,7 @@ def hkb_health(
 
 @_blocking_tool()
 def hkb_task(
-    action: Literal['create', 'show', 'update', 'list'] = "list",
+    action: Literal['create', 'show', 'update', 'list', 'claim', 'release'] = "list",
     title: str = "",
     description: str = "",
     file: str = "",
@@ -1334,19 +1380,24 @@ def hkb_task(
     ctx: Context = None,
     top: int = 100,
     offset: int = 0,
+    lease_minutes: int = 60,
 ) -> str:
-    """Task lifecycle: create, show, update, or list tasks.
+    """Task lifecycle: create, show, update, list, claim, or release tasks.
 
     Args:
-        action: "create", "show", "update", or "list" (default).
+        action: "create", "show", "update", "list" (default), "claim", or "release".
         title: Task title (action=create).
         description: Task description (action=create).
-        file: Target file (create default: "tasks.default"; required for show/update).
-        epoch: Entry epoch (required for show/update).
+        file: Target file. Default: the joined room's task file, else "tasks.default".
+            Required for show/update/claim/release outside a room.
+        epoch: Entry epoch (required for show/update/claim/release).
         priority: Priority (action=create) — low, normal, high, critical.
         blocked_by: Blocking task wiki-link (action=create).
         status: For update: new status. For list: filter (default "pending,in_progress,blocked").
-        note: For update: note to append.
+            For release: "pending" (default) or "blocked".
+        note: For update/release: note to append.
+        lease_minutes: For claim: how long the claim holds without renewal (default 60).
+            Claiming a task you already hold renews it; a room check-in renews it too.
         domain: For list: namespace filter.
         top: For list: page size (default 100, maximum 500).
         offset: For list: number of matching tasks to skip.
@@ -1356,13 +1407,24 @@ def hkb_task(
         show: JSON with title, description, status, timeline.
         update: JSON {status, file, epoch}.
         list: JSON {_summary, tasks[]}.
+        claim: JSON {status, owner, lease_until}; status "conflict" with the owner if another agent holds it.
+        release: JSON {status, task_status}.
     """
-    if action not in ('create', 'show', 'update', 'list'):
-        return json.dumps({"status": "error", "message": "action must be one of: create, show, update, list."})
+    if action not in ('create', 'show', 'update', 'list', 'claim', 'release'):
+        return json.dumps({"status": "error", "message": "action must be one of: create, show, update, list, claim, release."})
     store = _get_store(ctx)
+    app_ctx = ctx.request_context.lifespan_context
+    room_tasks = room_files(app_ctx.room)["tasks"] if app_ctx.room else ""
     try:
+        if action in ("claim", "release"):
+            file = file or room_tasks
+            if not file or not epoch:
+                return json.dumps({"status": "error", "message": f"file and epoch required for {action}"})
+            return _do_task_claim(store, app_ctx, action, file, epoch, status, note, lease_minutes)
         if action == "create":
-            return _do_task_create(store, title, description, file or "tasks.default", priority, blocked_by)
+            return _do_task_create(store, title, description, file or room_tasks or "tasks.default", priority, blocked_by)
+        if action in ("show", "update"):
+            file = file or room_tasks
         if action == "show":
             if not file or not epoch:
                 return json.dumps({"status": "error", "message": "file and epoch required for show"})
@@ -1428,11 +1490,34 @@ def _do_task_show(store, file, epoch):
         elif title:
             description_lines.append(line)
     description = "\n".join(description_lines).strip()
+    metadata = next((e["metadata"] for e in store.show_file(file)["entries"] if e["epoch"] == epoch), {})
     return json.dumps({
         "file": file, "epoch": epoch, "title": title, "description": description,
         "status": db_entry.get("status", "pending"), "tags": db_entry.get("tags", ""),
+        "owner": metadata.get("owner", ""), "lease_until": int(metadata.get("lease-until") or 0),
         "dependencies": dependencies, "timeline": timeline,
     }, indent=2)
+
+
+def _do_task_claim(store, app_ctx, action, file, epoch, status, note, lease_minutes):
+    """Claim or release a task as this session's room agent, else as the configured source."""
+    owner = app_ctx.agent
+    if not owner:
+        source = store._get_author()
+        if source == "unknown":
+            return json.dumps({"status": "error", "message":
+                               "No agent identity. Join a room with hkb_room, or set HKB_SOURCE."})
+        owner = agent_name(source)
+    if action == "claim":
+        try:
+            return json.dumps(claim_task(store, file, epoch, owner, lease_minutes))
+        except ClaimConflict as conflict:
+            return json.dumps({"status": "conflict", "owner": conflict.owner,
+                               "lease_until": conflict.lease_until, "message": str(conflict)})
+    force = False
+    if app_ctx.room and file == room_files(app_ctx.room)["tasks"]:
+        force = Rooms(store).who(app_ctx.room)["lead"]["name"] == owner
+    return json.dumps(release_task(store, file, epoch, owner, note, status or "pending", force))
 
 
 def _do_task_update(store, file, epoch, status, note):
@@ -1734,6 +1819,107 @@ def hkb_view(
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@_blocking_tool()
+def hkb_room(
+    action: Literal['join', 'checkin', 'send', 'inbox', 'who', 'charter', 'leave'] = "checkin",
+    room: str = "",
+    name: str = "",
+    harness: str = "",
+    role: str = "",
+    focus: str = "",
+    message: str = "",
+    to: str = "all",
+    kind: str = "note",
+    reply_to: int = 0,
+    from_human: bool = False,
+    lead: str = "",
+    human: str = "",
+    rules: str = "",
+    checkin_minutes: int = 0,
+    force: bool = False,
+    peek: bool = False,
+    top: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Work with other agents in a shared room: messages, presence, tasks and rules.
+
+    A room is a short name the user gives to every agent that must work together,
+    in any harness. Join once per session, then check in regularly. Room tasks use
+    hkb_task (create/claim/release/update); inside a room its file is the default.
+
+    Args:
+        action: "join", "checkin" (default), "send", "inbox", "who", "charter", or "leave".
+        room: Room name (required for join; optional later, defaults to the joined room).
+        name: Your agent name in the room (join). Keep the same name across sessions.
+        harness: Your harness, e.g. "claude-code", "codex" (join).
+        role: Your role, e.g. "backend", "reviewer" (join).
+        focus: What you are working on now (join, checkin).
+        message: Message text (send).
+        to: Recipient (send): an agent name, "all" (default), "lead", or "human".
+        kind: Message kind (send): note, question, answer, decision, handoff, blocker, status.
+        reply_to: Epoch of the message you answer (send); keeps the thread.
+        from_human: True when you post words your human user gave you (send).
+        lead: Agent to put in charge (join: only when creating the room; charter).
+        human: Name of the human who has the final say (join when creating; charter).
+        rules: Room rules and purpose shown to every agent that joins (join when creating; charter).
+        checkin_minutes: Longest time between check-ins (join when creating; charter). Default 10.
+        force: Change the charter although the lead is present. Only on the human's instruction.
+        peek: Read the inbox without marking messages read (inbox).
+        top: Maximum unread messages returned (checkin, inbox).
+
+    Returns:
+        join: JSON with guide (read and follow it), lead, human, agents, unread, my_tasks, open_tasks.
+        checkin: Same view without the guide; marks returned messages read and renews your task leases.
+        send: JSON {status, epoch, to, kind}.
+        inbox: JSON {unread[], unread_more, needs_human[]}.
+        who: JSON with lead, human, agents[] and the room's files.
+        charter: With no changes, the charter and guide; else JSON {status, changed}.
+        leave: JSON {status, released_tasks}.
+    """
+    if action not in ('join', 'checkin', 'send', 'inbox', 'who', 'charter', 'leave'):
+        return json.dumps({"status": "error",
+                           "message": "action must be one of: join, checkin, send, inbox, who, charter, leave."})
+    app_ctx = ctx.request_context.lifespan_context
+    rooms = Rooms(app_ctx.store)
+    try:
+        if action == "join":
+            if not room or not name:
+                return json.dumps({"status": "error", "message": "room and name are required for join"})
+            result = rooms.join(room, name, harness=harness, role=role, focus=focus, lead=lead,
+                                human=human, purpose=rules, checkin_minutes=checkin_minutes)
+            app_ctx.room, app_ctx.agent = result["room"], result["you"]
+            app_ctx.room_checkin_at = time.monotonic()
+            return json.dumps(result, indent=2)
+        target = normalize_name(room, "room name") if room else app_ctx.room
+        if not target:
+            return json.dumps({"status": "error", "message": "Not in a room. Call hkb_room(action=\"join\", room=..., name=...) first."})
+        if action == "who":
+            return json.dumps(rooms.who(target), indent=2)
+        if target != app_ctx.room:
+            return json.dumps({"status": "error", "message": f"This session joined '{app_ctx.room or 'no room'}', not '{target}'. Join '{target}' first."})
+        me = app_ctx.agent
+        if action == "checkin":
+            result = rooms.checkin(target, me, note=focus, top=top)
+            app_ctx.room_checkin_at = time.monotonic()
+        elif action == "send":
+            if not message:
+                return json.dumps({"status": "error", "message": "message is required for send"})
+            result = rooms.send(target, me, message, to=to, kind=kind, reply_to=reply_to, from_human=from_human)
+        elif action == "inbox":
+            result = rooms.inbox(target, me, top=top, peek=peek)
+        elif action == "charter":
+            result = rooms.charter(target, me, lead=lead, human=human, rules=rules,
+                                   checkin_minutes=checkin_minutes, force=force)
+        else:
+            result = rooms.leave(target, me, note=message)
+            app_ctx.room, app_ctx.agent = "", ""
+        return json.dumps(result, indent=2)
+    except ValueError as e:
+        return json.dumps({"status": "error", "message": str(e)})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1753,12 +1939,64 @@ async def _run_stdio():
             tasks.cancel_scope.cancel()
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+class _BearerAuth:
+    """Require one shared bearer token on every HTTP request."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        supplied = dict(scope.get("headers") or []).get(b"authorization", b"")
+        if hmac.compare_digest(supplied, self.expected):
+            await self.app(scope, receive, send)
+            return
+        body = b'{"error": "unauthorized"}'
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+            (b"www-authenticate", b"Bearer"),
+        ]})
+        await send({"type": "http.response.body", "body": body})
+
+
+def _http_app(host: str, token: str, allowed_hosts: list[str]):
+    """Build the HTTP application. Each MCP session gets its own lifespan context."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if host not in LOOPBACK_HOSTS:
+        if not token:
+            raise SystemExit("HKB_HTTP_TOKEN is required when --host is not a loopback address.")
+        # The server was created for loopback; name the hosts clients will use.
+        mcp_server.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=bool(allowed_hosts), allowed_hosts=allowed_hosts,
+        )
+    app = mcp_server.streamable_http_app()
+    return _BearerAuth(app, token) if token else app
+
+
+async def _run_http(args):
+    import uvicorn
+
+    allowed = [h.strip() for h in os.environ.get("HKB_HTTP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    app = _http_app(args.host, os.environ.get("HKB_HTTP_TOKEN", ""), allowed)
+    await uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="info")).serve()
+
+
 def main(argv: list[str] | None = None):
     """CLI entry point for the MCP server."""
     global _server_args
     _server_args = _parse_server_args(argv)
 
     try:
+        if _server_args.http:
+            anyio.run(_run_http, _server_args)
+            return
         anyio.run(_run_stdio)
     except KeyboardInterrupt:
         pass

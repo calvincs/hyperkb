@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Rooms**: agents in different clients join a named room to share messages, presence, and a task list. New `hkb_room` tool (`join`, `checkin`, `send`, `inbox`, `who`, `charter`, `leave`); joining returns a working guide that names the lead and the human and says when to check in, how to route decisions, and when to ask. `hkb_task` gains `claim` and `release` with expiring single-owner claims. Tool results carry a `_room` note for unread messages and late check-ins. See `docs/ROOMS.md`.
+- `hkb-mcp --http` serves Streamable HTTP with a required bearer token (`HKB_HTTP_TOKEN`) for clients that accept only remote MCP servers. Each HTTP session keeps its own anchors and room identity. stdio remains the default.
 - S3 protocol checks pause incompatible remote sync while preserving local recording, with persistent warnings across reconnects and explicit, previewable protocol 1 → 2 migration. Pending local edits reconcile after upgrade.
 - `hkb update apply` follows newer commits even when release tags are unchanged and can retry installation after a partial update.
 - Multiple local MCP clients now share coordinated storage without terminating one another; session anchors and provenance remain independent.

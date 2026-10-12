@@ -107,7 +107,7 @@ integrations/opencode/
 | Component | When Loaded | Purpose |
 |-----------|-------------|---------|
 | `instructions/hyperkb.md` | Every session, automatically | Tells model HKB exists, call briefing at start, quick tool table |
-| `skills/hyperkb/SKILL.md` | On-demand when model calls `skill("hyperkb")` | Decision guide for all 10 MCP tools, entry writing, error handling |
+| `skills/hyperkb/SKILL.md` | On-demand when model calls `skill("hyperkb")` | Decision guide for all 11 MCP tools, entry writing, error handling |
 | `skills/rem/SKILL.md` | On-demand when user types `/rem` | Quick save/recall with intent classification |
 
 ## Troubleshooting

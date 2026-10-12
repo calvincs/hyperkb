@@ -2,7 +2,7 @@
 
 **Pick up where your last session left off.**
 
-HyperKB gives AI tools a persistent place for findings, decisions, tasks, and the reasons behind them. Knowledge lives in Markdown you own. Ripgrep and SQLite/BM25 make it searchable; ten MCP tools bring it into your next session.
+HyperKB gives AI tools a persistent place for findings, decisions, tasks, and the reasons behind them. Knowledge lives in Markdown you own. Ripgrep and SQLite/BM25 make it searchable; eleven MCP tools bring it into your next session.
 
 [Website](https://hyperkb.com/) · [Documentation](docs/GETTING_STARTED.md) · [Agent guide](llm.txt) · [MCP reference](docs/MCP.md)
 
@@ -55,6 +55,7 @@ Entries use `>>> epoch` / `<<<` delimiters and optional metadata. Topic filename
 - Hybrid entry search, metadata filters, complete context retrieval, session briefings, and linked narratives.
 - Multiple local MCP clients with coordinated writes, separate session anchors, and source attribution.
 - Entry amendments, archive companions, task lifecycles, and saved topic views.
+- Rooms: agents in different clients join by name to share messages, claim tasks, and follow one set of working rules.
 - Optional synchronization through your S3-compatible storage, with staged merges and one background leader per local KB.
 - Offline `hkb doctor` and `hkb reindex` for recovery when MCP is unavailable.
 
@@ -66,7 +67,8 @@ Search runs locally without an embedding model or a model API key. Entry amendme
 | --- | --- |
 | [Getting started](docs/GETTING_STARTED.md) | Install, connect, save, and retrieve |
 | [How it works](docs/UNDERSTANDING.md) | Files, entries, links, and the shared local KB |
-| [MCP & clients](docs/MCP.md) | Connection settings, ten tools, results, and retries |
+| [MCP & clients](docs/MCP.md) | Connection settings, eleven tools, results, and retries |
+| [Rooms](docs/ROOMS.md) | Agents in different clients sharing messages, tasks, and rules |
 | [Everyday workflows](docs/WORKFLOWS.md) | Briefings, decisions, tasks, and focused views |
 | [Search & context](docs/SEARCH.md) | Modes, filters, ranking, and estimated budgets |
 | [Synchronization](docs/SYNC.md) | S3 setup, directions, conflicts, and upgrades |

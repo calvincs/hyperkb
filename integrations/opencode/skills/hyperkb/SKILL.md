@@ -56,7 +56,8 @@ Files are named topics (`domain.topic.subtopic`, 2-4 dot-separated segments). Ea
 
 ### I need to MANAGE
 
-- **Tasks** → `mcp__hyperkb__hkb_task` with `action` (create/show/update/list)
+- **Tasks** → `mcp__hyperkb__hkb_task` with `action` (create/show/update/list/claim/release)
+- **Rooms** → `mcp__hyperkb__hkb_room` with `action` (join/checkin/send/inbox/who/charter/leave). Join when the user names a room, then follow the returned guide
 - **Health** → `mcp__hyperkb__hkb_health` with `checks="all"`, `fix=True`
 - **Reindex** → `mcp__hyperkb__hkb_health` with `action="reindex"`
 - **Sync** → `mcp__hyperkb__hkb_sync` with `action="both"`

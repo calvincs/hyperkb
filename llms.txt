@@ -5,8 +5,10 @@
 
 HyperKB is MIT-licensed Python software. Knowledge lives in topic-named Markdown
 files; SQLite is a rebuildable index. Multiple local stdio clients share storage
-with coordinated mutations and independent session context. There is no public
-HTTP MCP endpoint in this project.
+with coordinated mutations and independent session context. Agents in different
+clients can join a named room to share messages and tasks. An optional
+token-protected HTTP mode serves clients that cannot launch a local process;
+this project hosts no public MCP endpoint.
 
 ## Start here
 
@@ -19,6 +21,7 @@ HTTP MCP endpoint in this project.
 ## Work with knowledge
 
 - [Everyday workflows](docs/WORKFLOWS.md)
+- [Rooms: agents working together](docs/ROOMS.md)
 - [Search & context](docs/SEARCH.md)
 - [Sync and migration](docs/SYNC.md)
 - [Maintenance & recovery](docs/OPERATIONS.md)

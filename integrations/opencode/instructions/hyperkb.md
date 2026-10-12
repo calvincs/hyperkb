@@ -21,7 +21,7 @@ to see what knowledge files exist, recent activity, and open tasks.
   bug root causes, architecture decisions, hard-won configurations, and procedural
   skills (workarounds, techniques, how-to steps).
 
-## Quick Reference (10 tools)
+## Quick Reference (11 tools)
 
 | Task | Tool | Key Params |
 |------|------|------------|
@@ -33,7 +33,8 @@ to see what knowledge files exist, recent activity, and open tasks.
 | Create file | `mcp__hyperkb__hkb_add` | `create_file=True`, `to`, `description`, `keywords` |
 | Recent timeline | `mcp__hyperkb__hkb_search` | `mode="recent"`, `top`, `after` |
 | Update entry | `mcp__hyperkb__hkb_update` | `file`, `epoch`, `new_content`, `set_status` |
-| Tasks | `mcp__hyperkb__hkb_task` | `action` (create/show/update/list) |
+| Tasks | `mcp__hyperkb__hkb_task` | `action` (create/show/update/list/claim/release) |
+| Rooms (work with other agents) | `mcp__hyperkb__hkb_room` | `action` (join/checkin/send/inbox/who/charter/leave) |
 | Token-budgeted context | `mcp__hyperkb__hkb_context` | `topic`, `max_tokens`, `mode` |
 | Health checks | `mcp__hyperkb__hkb_health` | `checks` (all/quick/links/sync/quality), `fix` |
 | Sync with S3 | `mcp__hyperkb__hkb_sync` | `action` (both/push/pull/status), `dry_run` |

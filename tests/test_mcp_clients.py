@@ -43,15 +43,15 @@ def test_two_stdio_clients_share_kb_and_keep_sessions(tmp_path):
                     await session.initialize()
                     return session
 
-                async def call(session, name, **kwargs):
-                    response = await session.call_tool(name, kwargs)
+                async def call(session, tool, /, **kwargs):
+                    response = await session.call_tool(tool, kwargs)
                     assert not response.isError, response
                     return json.loads(response.content[0].text)
 
                 first = await connect("client-a")
-                assert len((await first.list_tools()).tools) == 10
+                assert len((await first.list_tools()).tools) == 11
                 second = await connect("client-b")
-                assert len((await first.list_tools()).tools) == 10
+                assert len((await first.list_tools()).tools) == 11
                 await call(first, "hkb_add", create_file=True, to="shared.notes",
                            description="Shared protocol notes", keywords=["shared"])
                 results = []
@@ -68,6 +68,23 @@ def test_two_stdio_clients_share_kb_and_keep_sessions(tmp_path):
                 await call(second, "hkb_session", action="anchor", topics="beta")
                 assert (await call(first, "hkb_session", action="anchor"))["anchors"] == ["alpha"]
                 assert (await call(second, "hkb_session", action="anchor"))["anchors"] == ["beta"]
+                # Two harnesses meet in a room: one message, one task, one owner.
+                joined = await call(first, "hkb_room", action="join", room="atlas", name="claude-1")
+                assert joined["lead"]["name"] == "claude-1" and "CHECK IN" in joined["guide"]
+                await call(second, "hkb_room", action="join", room="atlas", name="codex-1")
+                await call(first, "hkb_room", action="send", to="codex-1", message="take the parser")
+                noticed = await call(second, "hkb_show", name="shared.notes")
+                assert noticed["_room"]["unread"] == 1
+                inbox = await call(second, "hkb_room", action="checkin")
+                assert [m["from"] for m in inbox["unread"]] == ["claude-1"]
+                task = await call(first, "hkb_task", action="create", title="Build the parser")
+                claims = []
+                async def claim(session):
+                    claims.append(await call(session, "hkb_task", action="claim", epoch=task["epoch"]))
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(claim, first)
+                    tasks.start_soon(claim, second)
+                assert sorted(result["status"] for result in claims) == ["conflict", "ok"]
 
     anyio.run(run)
 
@@ -129,7 +146,7 @@ def test_startup_recovers_missing_index_without_changing_config(tmp_path, monkey
 @pytest.mark.parametrize("name,param", [
     ("hkb_search", "mode"), ("hkb_context", "mode"), ("hkb_view", "action"),
     ("hkb_task", "action"), ("hkb_session", "action"), ("hkb_health", "action"),
-    ("hkb_update", "action"), ("hkb_sync", "action"),
+    ("hkb_update", "action"), ("hkb_sync", "action"), ("hkb_room", "action"),
 ])
 def test_tool_action_schema_rejects_unknown(name, param):
     tool = server.mcp_server._tool_manager.get_tool(name)

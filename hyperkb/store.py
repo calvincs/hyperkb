@@ -496,6 +496,71 @@ class KnowledgeStore:
             )
             return {"status": "ok", "file": file_name, "epoch": epoch}
 
+    def set_entry_metadata(
+        self,
+        file_name: str,
+        epoch: int,
+        updates: dict,
+        guard=None,
+        append_line: str = "",
+    ) -> dict:
+        """Check and change an entry's metadata in one locked step.
+
+        ``updates`` maps metadata keys to new values; a value of None removes
+        the key. ``guard`` receives the current metadata and may raise
+        ValueError to refuse the change before anything is written, which
+        makes claims safe across processes sharing this storage.
+
+        Returns dict with status and the resulting metadata.
+        """
+        file_name = normalize_filename(file_name)
+
+        with self._write_lock:
+            filepath = self._file_path(file_name)
+            if not filepath.exists():
+                raise ValueError(f"File '{file_name}' not found on disk.")
+
+            header, entries = parse_file(filepath)
+            target = next((e for e in entries if e.epoch == epoch), None)
+            if target is None:
+                raise ValueError(f"Entry not found: {file_name} at epoch {epoch}")
+
+            meta = dict(target.metadata)
+            if guard is not None:
+                guard(dict(meta))
+
+            for key, value in updates.items():
+                if value is None:
+                    meta.pop(key, None)
+                else:
+                    meta[key] = " ".join(str(value).split())
+            if "status" in meta and meta["status"] not in VALID_STATUS:
+                raise ValueError(f"Invalid status '{meta['status']}'. Valid: {sorted(VALID_STATUS)}")
+            if "weight" in meta and meta["weight"] not in VALID_WEIGHT:
+                meta["weight"] = "normal"
+
+            target.metadata = meta
+            if append_line:
+                target.content = self._validate_content(f"{target.content}\n{append_line}")
+            atomic_write_text(filepath, create_file_content(header, entries), encoding="utf-8")
+
+            self.db.update_entry(
+                file_name, epoch,
+                content=target.content if append_line else None,
+                status=meta.get("status"),
+                entry_type=meta.get("type"),
+                tags=meta.get("tags", ""),
+                weight=meta.get("weight"),
+                author=meta.get("author"),
+                hostname=meta.get("hostname"),
+            )
+
+            self._sync_commit(
+                [f"{file_name}.md"],
+                f"update metadata in {file_name} at {epoch}",
+            )
+            return {"status": "ok", "file": file_name, "epoch": epoch, "metadata": meta}
+
     def archive_entry(self, file_name: str, epoch: int) -> dict:
         """Move an entry from a source file to its .archive companion file.
 

@@ -1,6 +1,6 @@
 # HyperKB: short guide for an authorized AI client
 
-HyperKB is persistent local knowledge exposed through ten stdio MCP tools.
+HyperKB is persistent local knowledge exposed through eleven stdio MCP tools.
 Read tools/list for current schemas. Full reference: SKILL.md.
 
 Start a session with hkb_session(action="briefing"). Use a domain, focus, or
@@ -23,6 +23,12 @@ Entry metadata starts with @type, @status, @weight, and @tags lines. Provenance
 normally comes from HKB_SOURCE and the machine hostname. Keep the returned
 file+epoch pair for updates and links; do not guess an epoch. Wiki-links are
 [[domain.topic]] or [[domain.topic#epoch]].
+
+When the user names a room, call hkb_room(action="join", room=..., name=...),
+read the returned guide, and follow it: check in often, claim a task with
+hkb_task(action="claim") before working on it, send plan questions to the
+lead, and ask the human when in doubt. A refused claim means another agent
+owns the task; do not retry. Full guide: docs/ROOMS.md.
 
 Use hkb_update to amend, change status, or archive; hkb_task for task lifecycle;
 hkb_view for saved file groups; hkb_health for maintenance. Preview compaction:

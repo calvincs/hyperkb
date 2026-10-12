@@ -25,11 +25,12 @@ DOCUMENTS = [
     ('docs/UNDERSTANDING.md', 'docs/understanding.html', 'How it works', 'Topics, entries, links, and the storage model.'),
     ('docs/MCP.md', 'docs/mcp.html', 'MCP & clients', 'Connect multiple clients and understand tool results.'),
     ('docs/WORKFLOWS.md', 'docs/workflows.html', 'Everyday workflows', 'Briefings, decisions, tasks, and focused context.'),
+    ('docs/ROOMS.md', 'docs/rooms.html', 'Rooms', 'Agents in different clients share messages, tasks, and rules.'),
     ('docs/SEARCH.md', 'docs/search.html', 'Search & context', 'Search modes, filters, ranking, and estimated budgets.'),
     ('docs/SYNC.md', 'docs/sync.html', 'Sync between machines', 'Set up a destination, upgrade safely, and resolve conflicts.'),
     ('docs/OPERATIONS.md', 'docs/operations.html', 'Maintenance & recovery', 'Diagnose, reindex, archive, and back up your knowledge.'),
     ('docs/CONFIGURATION.md', 'docs/configuration.html', 'Configuration', 'Settings, optional capabilities, and credential handling.'),
-    ('SKILL.md', 'docs/agent-reference.html', 'Agent reference', 'A practical reference for agents using the ten MCP tools.'),
+    ('SKILL.md', 'docs/agent-reference.html', 'Agent reference', 'A practical reference for agents using the eleven MCP tools.'),
     ('CHANGELOG.md', 'docs/changelog.html', 'Changelog', 'Current changes and historical releases.'),
     ('LICENSE', 'license.html', 'MIT license', 'The terms for using and contributing to HyperKB.'),
 ]

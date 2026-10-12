@@ -1,6 +1,6 @@
 # MCP & clients
 
-HyperKB exposes ten tools through a local stdio MCP server. The client launches `hkb-mcp`; no public HTTP endpoint or listening port is required.
+HyperKB exposes eleven tools through a local stdio MCP server. The client launches `hkb-mcp`; no public HTTP endpoint or listening port is required.
 
 ## Connect a client
 
@@ -24,7 +24,7 @@ The exact settings file and wrapper keys depend on your client. Reuse the execut
 
 Register the same executable and KB root in each client. Give each a different `HKB_SOURCE`, such as `editor-a` and `terminal-b`. No shared server port or handoff script is needed.
 
-Clients share entries and index state. Session anchors remain in the individual process and reset when it exits. `HKB_SOURCE` identifies new entries; it is not an authentication boundary. Do not give an untrusted process access to your knowledge directory.
+Clients share entries and index state. Session anchors remain in the individual process and reset when it exits. To let the agents in those clients exchange messages and divide tasks, see [rooms](ROOMS.md). `HKB_SOURCE` identifies new entries; it is not an authentication boundary. Do not give an untrusted process access to your knowledge directory.
 
 To share a nondefault KB root, include:
 
@@ -36,6 +36,21 @@ Restart every client when upgrading the executable. Avoid running an old server 
 
 For sync-enabled clients, each tool call checks the S3 protocol. Local knowledge operations continue during outages or mismatches and include an `_protocol` warning. Search results, normally a list, use `{ "result": [...], "_protocol": {...} }` while a warning is present. Packed context counts diagnostic metadata in its token estimate; if the mandatory notice alone exceeds the budget, it returns no entries and explicitly reports `budget_exceeded`. Remote sync calls fail with an actionable protocol error until compatibility is verified. Every client performs its own check, including background-worker followers. See [sync and migration](SYNC.md#upgrade-existing-installations-first).
 
+## Serve a client that cannot launch a process
+
+Some clients accept only remote MCP servers. Run the same server with Streamable HTTP for them:
+
+```bash
+HKB_HTTP_TOKEN="a-long-random-value" HKB_SOURCE="remote-agent" \
+  hkb-mcp --http --host 0.0.0.0 --port 8377 --path /absolute/path/to/knowledge-root
+```
+
+The endpoint is `http://<host>:8377/mcp`. Clients send `Authorization: Bearer <token>`. The default bind address is `127.0.0.1`; any other address requires `HKB_HTTP_TOKEN`. Set `HKB_HTTP_ALLOWED_HOSTS` to a comma-separated list such as `hkb-mcp:8377` to also check the `Host` header.
+
+Each HTTP session has its own anchors and room identity, as each stdio client does. A session idle for 30 minutes closes; the client reconnects and joins its room again under the same name. Every HTTP client shares the server's one `HKB_SOURCE`.
+
+The token is the only access control and the transport is plain HTTP. Keep the port on a private network, such as a container network, and never expose it to the internet. To share knowledge with stdio clients on another machine, point both at the same [sync](SYNC.md) destination.
+
 ## Tool map
 
 | Tool | Use it for | Main modes or actions |
@@ -44,12 +59,13 @@ For sync-enabled clients, each tool call checks the S3 protocol. Local knowledge
 | `hkb_show` | Read a file, list topic files, inspect links | Empty `name` lists files; `links=True` adds a graph |
 | `hkb_add` | Append an entry or create a topic | `create_file=True` creates a file |
 | `hkb_update` | Amend content or metadata, archive, batch changes | `update`, `archive`, `batch` |
-| `hkb_task` | Create and track tasks | `create`, `show`, `update`, `list` |
+| `hkb_task` | Create, track, and claim tasks | `create`, `show`, `update`, `list`, `claim`, `release` |
 | `hkb_sync` | Synchronize or inspect sync configuration | `both`, `push`, `pull`, `status`, `config`, `conflicts` |
 | `hkb_session` | Start, focus, and review a session | `briefing`, `anchor`, `review` |
 | `hkb_context` | Retrieve focused context | `packed`, `suggest`, `narrative` |
 | `hkb_view` | Save named groups of files | `set`, `list` |
 | `hkb_health` | Check, rebuild, or group old entries | `check`, `reindex`, `compact` |
+| `hkb_room` | Work with agents in other clients | `join`, `checkin`, `send`, `inbox`, `who`, `charter`, `leave` |
 
 For exact parameter names, discover the running server's `tools/list`. The [agent reference](../SKILL.md) and [workflow examples](WORKFLOWS.md) explain common combinations.
 
